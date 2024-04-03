@@ -1,0 +1,276 @@
+#######DEYE Energy flow sensors##########
+
+sensor:
+  - platform: template
+    sensors:
+      pv_own_usage:
+        friendly_name: "PV Own Usage" 
+        unit_of_measurement: 'W'
+        value_template: >-
+          {% set pv_production = (states('sensor.ss_pv1_power') | float) + (states('sensor.ss_pv2_power') | float) %}
+          {% set household_consumption = states('sensor.ss_load_power') | float %}
+          {% set battery_charge_power = states('sensor.ss_battery_power') | float %}
+          {% set battery_charge = battery_charge_power if battery_charge_power > 0 else 0 %}
+          {% set pv_usage_before_limit = pv_production - battery_charge %}
+          {% set pv_own_usage = [pv_usage_before_limit, household_consumption] | min %}
+          {{ [pv_own_usage, 0] | max }}
+      
+      pv_to_battery:
+        friendly_name: "PV to Battery"
+        unit_of_measurement: 'W'
+        value_template: >-
+          {% set pv_production = (states('sensor.ss_pv1_power') | float) + (states('sensor.ss_pv2_power') | float) %}
+          {% set household_consumption = states('sensor.ss_load_power') | float %}
+          {% set battery_charge_power = states('sensor.ss_battery_power') | float %}
+          {% set grid_export_power = states('sensor.ss_grid_power') | float %}
+          {% set grid_export = grid_export_power if grid_export_power < 0 else 0 %}
+          {% set pv_to_battery = pv_production - household_consumption - grid_export %}
+          {% if battery_charge_power > 0 and pv_to_battery > 0 %}
+            {{ [pv_to_battery, battery_charge_power] | min }}
+          {% else %}
+            0
+          {% endif %}
+
+      pv_back_to_grid:
+        friendly_name: "PV Back to Grid"
+        unit_of_measurement: 'W'
+        value_template: >-
+          {% set pv_production = (states('sensor.ss_pv1_power') | float) + (states('sensor.ss_pv2_power') | float) %}
+          {% set household_consumption = states('sensor.ss_load_power') | float %}
+          {% set battery_charge_power = states('sensor.ss_battery_power') | float %}
+          {% set battery_charge = battery_charge_power if battery_charge_power > 0 else 0 %}
+          {% set pv_back_to_grid = pv_production - household_consumption - battery_charge %}
+          {{ [pv_back_to_grid, 0] | max }}
+      
+      grid_to_battery:
+        friendly_name: "Grid to Battery"
+        unit_of_measurement: 'W'
+        value_template: >-
+          {% set pv_production = (states('sensor.ss_pv1_power') | float) + (states('sensor.ss_pv2_power') | float) %}
+          {% set household_consumption = states('sensor.ss_load_power') | float %}
+          {% set battery_charge_power = states('sensor.ss_battery_power') | float %}
+          {% set grid_power = states('sensor.ss_grid_power') | float %}
+          {% set net_consumption = household_consumption + battery_charge_power - pv_production %}
+          
+          {% if battery_charge_power > 0 and grid_power > 0 %}
+            {% if net_consumption > 0 %}
+              {% set grid_to_battery = [net_consumption, grid_power] | min %}
+              {{ [grid_to_battery, 0] | max }}
+            {% else %}
+              0
+            {% endif %}
+          {% else %}
+            0
+          {% endif %}
+      
+      battery_own_usage:
+        friendly_name: "Battery Own Usage"
+        unit_of_measurement: 'W'
+        value_template: >-
+          {% set battery_discharge_power = states('sensor.ss_battery_power') | float %}
+          {% set battery_discharging = battery_discharge_power < 0 %}
+          {% set household_consumption = states('sensor.ss_load_power') | float %}
+          {% set pv_production = (states('sensor.ss_pv1_power') | float) + (states('sensor.ss_pv2_power') | float) %}
+          {% set consumption_excess = household_consumption - pv_production %}
+          {% if battery_discharging %}
+            {% set battery_own_usage = [consumption_excess, battery_discharge_power | abs] | min %}
+          {% else %}
+            {% set battery_own_usage = 0 %}
+          {% endif %}
+          {{ battery_own_usage }}
+
+      battery_back_to_grid:
+        friendly_name: "Battery Back to Grid"
+        unit_of_measurement: 'W'
+        value_template: >-
+          {% set battery_discharge_power = states('sensor.ss_battery_power') | float %}
+          {% set battery_discharging = battery_discharge_power < 0 %}
+          {% set grid_export_power = states('sensor.ss_grid_power') | float %}
+          {% set grid_export = grid_export_power if grid_export_power < 0 else 0 %}
+          {% if battery_discharging %}
+            {% set battery_back_to_grid = grid_export + battery_discharge_power %}
+          {% else %}
+            {% set battery_back_to_grid = 0 %}
+          {% endif %}
+          {{ [battery_back_to_grid, 0] | max }}
+
+##### PV Benefit calculations ### (Utility Meters end of the code)
+
+  - platform: template
+    sensors:
+      pv_to_grid_benefit_now:
+        friendly_name: 'PV to grid now'
+        unit_of_measurement: "EUR"
+        value_template: "{{ states('sensor.nordpool_kwh_ee_eur_3_10_0') | float * states('sensor.pv_back_to_grid') | float / 1000 }}"
+  - platform: integration
+    name: PV to Grid Cumulative Benefit
+    source: pv_to_grid_benefit_now
+    method: left
+
+    
+  - platform: template
+    sensors:
+      pv_own_usage_benefit_now:
+        friendly_name: 'PV Own Usage Now'
+        unit_of_measurement: "EUR"
+        value_template: "{{ states('sensor.nordpool_with_vat_and_tarifss') | float * states('sensor.pv_own_usage') | float / 1000 }}"
+  - platform: integration
+    name: PV Own Usage Cumulative Benefit
+    source: pv_own_usage_benefit_now
+    method: left
+
+#### Grid to Battery , battery to grid, battery own usage cost
+
+  - platform: template #cost of grid to battery
+    sensors:
+      grid_to_battery_right_now:
+        friendly_name: 'Grid To Battery Now'
+        unit_of_measurement: "EUR"
+        value_template: "{{ states('sensor.nordpool_with_vat_and_tarifss') | float * states('sensor.grid_to_battery') | float / 1000 }}"
+  - platform: integration
+    name: Grid To Battery Cumulative
+    source: sensor.grid_to_battery_right_now
+    method: left
+
+  - platform: template #cost of battery to grid
+    sensors:
+      battery_to_grid_cost_now_helper:
+        friendly_name: 'Battery to Grid Cost Now Helper'
+        unit_of_measurement: "EUR"
+        value_template: "{{ states('sensor.battery_energy_cost_per_kwh') | float * states('sensor.battery_back_to_grid') | float / 1000 }}"
+  - platform: integration
+    name: Battery to Grid Cumulative Cost
+    source: sensor.battery_to_grid_cost_now_helper
+    method: left
+
+  - platform: template #cost of battery to own usage
+    sensors:
+      battery_own_usage_cost_now_helper:
+        friendly_name: 'Battery Own Usage Cost Now Helper'
+        unit_of_measurement: "EUR"
+        value_template: "{{ states('sensor.battery_energy_cost_per_kwh') | float * states('sensor.battery_back_to_grid') | float / 1000 }}" 
+  - platform: integration
+    name: Battery Own Usage Cumulative Cost
+    source: sensor.battery_own_usage_cost_now_helper
+    method: left
+
+  - platform: template #cost of energy in battery
+    sensors:
+      net_battery_energy_cost:
+        friendly_name: "Net Battery Energy Cost"
+        unit_of_measurement: "EUR"
+        value_template: >-
+          {% set grid_to_battery_cost = states('sensor.grid_to_battery_cumulative') | float(default=0) %}
+          {% set battery_to_grid_cost = states('sensor.battery_to_grid_cumulative_cost') | float(default=0) %}
+          {% set battery_own_usage_cost = states('sensor.battery_own_usage_cumulative_cost') | float(default=0) %}
+          {{ (grid_to_battery_cost - battery_to_grid_cost - battery_own_usage_cost) | round(2) }}
+
+  - platform: template # cost in battery €/kwh. It's calculated from SOC. I have 20kwh battery and it's hardcoded here. 
+    sensors:
+      battery_energy_cost_per_kwh:
+        friendly_name: "Battery Energy Cost per kWh"
+        unit_of_measurement: "€/kWh"
+        value_template: >-
+          {% set net_cost = states('sensor.net_battery_energy_cost') | float(default=0) %}
+          {% set soc = states('sensor.ss_battery_soc') | float(default=0) %}
+          {% set capacity_kwh = 20 %}
+          {% set stored_energy_kwh = ((soc / 100) * capacity_kwh) | float(default=0) %}
+          {% if stored_energy_kwh > 0 %}
+            {{ (net_cost / stored_energy_kwh) | round(2) }}
+          {% else %}
+            0
+          {% endif %}
+
+##### Battery Benefit calculations ### (Utility Meters end of the code)
+
+  - platform: template # battery to grid logic is nordpool price without VAT minus cost in battery
+    sensors:
+      battery_to_grid_benefit_now:
+        friendly_name: 'Battery to Grid now'
+        unit_of_measurement: "EUR"
+        value_template: >-
+          {% set market_price_per_kwh = states('sensor.nordpool_kwh_ee_eur_3_10_0') | float %}
+          {% set cost_per_kwh_in_battery = states('sensor.battery_energy_cost_per_kwh') | float %}
+          {% set energy_back_to_grid_kwh = states('sensor.battery_back_to_grid') | float / 1000 %}
+          {{ ((market_price_per_kwh - cost_per_kwh_in_battery) * energy_back_to_grid_kwh) | round(2) }}
+  - platform: integration
+    name: Battery to Grid Cumulative Benefit
+    source: sensor.battery_to_grid_benefit_now
+    method: left
+
+  - platform: template # battery own usage logic is nordpool price with VAT and tariffs minus cost in battery
+    sensors:
+      battery_own_usage_benefit_now:
+        friendly_name: 'Battery Own Usage Now'
+        unit_of_measurement: "EUR"
+        value_template: >-
+          {% set current_price_per_kwh = states('sensor.nordpool_with_vat_and_tarifss') | float %}
+          {% set cost_per_kwh_in_battery = states('sensor.battery_energy_cost_per_kwh') | float %}
+          {% set energy_own_usage_kwh = states('sensor.battery_own_usage') | float / 1000 %}
+          {{ ((current_price_per_kwh - cost_per_kwh_in_battery) * energy_own_usage_kwh) | round(2) }}
+  - platform: integration
+    name: Battery Own Usage Cumulative Benefit
+    source: sensor.battery_own_usage_benefit_now
+    method: left
+
+
+
+####### PV & Battery Benefit Utility Meter Conf
+
+utility_meter:
+  pv_own_usage_benefit_daily:
+    source: sensor.pv_own_usage_benefit_cumulative
+    name: PV Own Usage Benefit Daily
+    cycle: daily
+  pv_to_grid_benefit_daily:
+    source: sensor.pv_to_grid_cumulative_benefit
+    name: PV to Grid Benefit Daily
+    cycle: daily
+
+  pv_own_usage_benefit_monthly:
+    source: sensor.pv_own_usage_benefit_cumulative
+    name: PV Own Usage Benefit Monthly
+    cycle: monthly
+  pv_to_grid_benefit_monthly:
+    source: sensor.pv_to_grid_cumulative_benefit
+    name: PV to Grid Benefit Monthly
+    cycle: monthly
+
+  pv_own_usage_benefit_yearly:
+    source: sensor.pv_own_usage_benefit_cumulative
+    name: PV Own Usage Benefit Yearly
+    cycle: yearly
+  pv_to_grid_benefit_yearly:
+    source: sensor.pv_to_grid_cumulative_benefit
+    name: PV to Grid Benefit Yearly
+    cycle: yearly
+
+  battery_to_grid_benefit_daily:
+    source: sensor.battery_to_grid_cumulative_benefit
+    cycle: daily
+    name: Battery to Grid Benefit Daily
+
+  battery_to_grid_benefit_monthly:
+    source: sensor.battery_to_grid_cumulative_benefit
+    cycle: monthly
+    name: Battery to Grid Benefit Monthly
+
+  battery_to_grid_benefit_yearly:
+    source: sensor.battery_to_grid_cumulative_benefit
+    cycle: yearly
+    name: Battery to Grid Benefit Yearly
+
+  battery_own_usage_benefit_daily:
+    source: sensor.battery_own_usage_cumulative_benefit
+    cycle: daily
+    name: Battery Own Usage Benefit Daily
+
+  battery_own_usage_benefit_monthly:
+    source: sensor.battery_own_usage_cumulative_benefit
+    cycle: monthly
+    name: Battery Own Usage Benefit Monthly
+
+  battery_own_usage_benefit_yearly:
+    source: sensor.battery_own_usage_cumulative_benefit
+    cycle: yearly
+    name: Battery Own Usage Benefit Yearly
