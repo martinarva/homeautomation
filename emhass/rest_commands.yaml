@@ -12,7 +12,6 @@ rest_command:
     content_type: 'application/json'
     payload: >-
       {
-        "delta_forecast": 1,
         "load_cost_forecast": {{
           ((state_attr('sensor.nordpool_with_vat_and_tarifss', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_with_vat_and_tarifss', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:24]) | tojson
         }},
@@ -24,9 +23,7 @@ rest_command:
         }},
         "pv_power_forecast": {{
           (([states('sensor.solcast_pv_forecast_power_now')|int(0)] + state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list + state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list) | tojson)
-        }},
-        "var_model": "sensor.ss_load_power",
-        "var_load": "sensor.ss_load_power"
+        }}
       }
 
   naive_mpc_optim:
@@ -35,7 +32,6 @@ rest_command:
     content_type: 'application/json'
     payload: >-
       {
-        "delta_forecast": 2,
         "load_cost_forecast": {{
           ((state_attr('sensor.nordpool_with_vat_and_tarifss', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_with_vat_and_tarifss', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
         }},
@@ -43,13 +39,11 @@ rest_command:
           ((state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
         }},
         "prediction_horizon": {{
-          (min(24, (((state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
+          (min(48, (((state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
         }},
         "pv_power_forecast": {{
           (([states('sensor.solcast_pv_forecast_power_now')|int(0)] + state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list + state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list) | tojson)
-        }},
-        "var_model": "sensor.ss_load_power",
-        "var_load": "sensor.ss_load_power"     
+        }}    
       }
 
   ml_forecast_model_fit:
@@ -58,9 +52,10 @@ rest_command:
     content_type: 'application/json'
     payload: >-
       {
-        "days_to_retrieve": 19,
+        "days_to_retrieve": 20,
         "model_type": "load_forecast",
         "var_model": "sensor.ss_load_power",
+        "sklearn_model": "KNeighborsRegressor",
         "num_lags": 48,
         "split_date_delta": "48h",
         "perform_backtest": "True"
@@ -72,9 +67,10 @@ rest_command:
     content_type: 'application/json'
     payload: >-
       {
-        "days_to_retrieve": 19,
+        "days_to_retrieve": 20,
         "model_type": "load_forecast",
         "var_model": "sensor.ss_load_power",
+        "sklearn_model": "KNeighborsRegressor",
         "num_lags": 48,
         "split_date_delta": "48h",
         "perform_backtest": "True"
