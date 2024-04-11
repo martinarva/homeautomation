@@ -1,0 +1,54 @@
+### ML Forecast Fit & Model Tune
+alias: "EMHASS dailly ML model fit "
+description: ""
+trigger:
+  - platform: time
+    at: "23:55:00"
+condition: []
+action:
+  - service: rest_command.ml_forecast_model_fit
+    data: {}
+  - delay:
+      hours: 0
+      minutes: 2
+      seconds: 0
+      milliseconds: 0
+  - service: rest_command.ml_forecast_model_tune
+    data: {}
+mode: single
+
+
+
+### Dayahead Optimization
+alias: EMHASS day-ahead optimization
+trigger:
+  - platform: time
+    at: "23:57:00"
+action:
+  - service: rest_command.dayahead_optim
+    data: {}
+
+
+### MPC
+alias: EMHASS MPC every 5 minutes
+description: ""
+trigger:
+  - platform: time_pattern
+    minutes: /5
+condition: []
+action:
+  - service: rest_command.naive_mpc_optim
+    data: {}
+mode: single
+
+###Publish Data
+
+alias: EMHASS publish data
+trigger:
+  - minutes: /5
+    platform: time_pattern
+action:
+  - service: rest_command.publish_data
+    data: {}
+
+
