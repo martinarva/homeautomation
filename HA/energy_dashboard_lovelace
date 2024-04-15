@@ -1,0 +1,655 @@
+background: var(--background-image)
+title: Home
+views:
+  - theme: Backend-selected
+    path: default_view
+    title: Home
+    icon: mdi:home-circle
+    badges: []
+    cards:
+  - title: EMHASS
+    path: emhass
+    icon: mdi:home-lightning-bolt-outline
+    type: custom:horizontal-layout
+    cards:
+      - type: custom:sunsynk-power-flow-card
+        cardstyle: lite
+        show_solar: true
+        card_height: 500
+        large_font: true
+        inverter:
+          modern: false
+          colour: '#DCDCDC'
+          autarky: energy
+          three_phase: true
+          auto_scale: true
+          model: deye
+        battery:
+          energy: 20480
+          colour: '#8CC63F'
+          shutdown_soc: 10
+          invert_power: true
+          full_capacity: 100
+          empty_capacity: 10
+          show_remaining_energy: true
+          show_absolute: false
+          auto_scale: true
+          hide_soc: false
+          show_daily: true
+          linear_gradient: true
+          dynamic_colour: true
+          max_power: 120000
+        solar:
+          show_daily: true
+          mppts: 2
+          max_power: 13200
+          auto_scale: true
+          dynamic_colour: true
+          colour: '#FFD966'
+          display_mode: 2
+          pv1_name: Lääs
+          pv2_name: Ida
+        load:
+          show_daily: true
+          additional_loads: 4
+          load1_name: Heat
+          load1_icon: mdi:heat-pump
+          load2_name: EV
+          load2_icon: mdi:car
+          load3_name: Lights
+          load3_icon: mdi:lightbulb
+          aux_type: mdi:gen
+          aux_name: Generaator
+          show_aux: false
+          auto_scale: true
+          dynamic_colour: true
+          dynamic_icon: true
+          colour: '#5AB4DE'
+        grid:
+          show_daily_buy: true
+          show_daily_sell: true
+          show_nonessential: false
+          auto_scale: true
+          invert_grid: false
+          colour: '#FF7E7E'
+          max_power: 13900
+          grid_name: Alexela
+        entities:
+          use_timer_248: switch.sunsynk_toggle_system_timer
+          priority_load_243: switch.ss_priority_load
+          inverter_voltage_154: sensor.ss_inverter_voltage
+          inverter_voltage_L2: null
+          inverter_voltage_L3: null
+          load_frequency_192: sensor.ss_grid_frequency
+          inverter_current_164: null
+          inverter_current_L2: null
+          inverter_current_L3: null
+          inverter_power_175: sensor.ss_inverter_power
+          grid_connected_status_194: binary_sensor.ss_grid_connected
+          inverter_status_59: sensor.ss_overall_state
+          day_battery_charge_70: sensor.ss_day_battery_charge
+          day_battery_discharge_71: sensor.ss_day_battery_discharge
+          battery_voltage_183: sensor.ss_battery_voltage
+          battery_soc_184: sensor.ss_battery_soc
+          battery_power_190: sensor.ss_battery_power
+          battery_current_191: sensor.ss_battery_current
+          grid_power_169: sensor.ss_grid_power
+          grid_ct_power_172: sensor.ss_grid_l1_power
+          grid_ct_power_L2: sensor.ss_grid_l2_power
+          grid_ct_power_L3: sensor.ss_grid_l3_power
+          day_grid_import_76: sensor.ss_day_grid_import
+          day_grid_export_77: sensor.ss_day_grid_export
+          day_load_energy_84: sensor.ss_day_load_energy
+          essential_power: sensor.ss_load_power
+          day_pv_energy_108: sensor.ss_day_pv_energy
+          pv_total: sensor.total_pv_power
+          pv1_power_186: sensor.ss_pv1_power
+          pv1_voltage_109: sensor.ss_pv1_voltage
+          pv1_current_110: sensor.ss_pv1_current
+          pv2_voltage_111: sensor.ss_pv2_voltage
+          pv2_current_112: sensor.ss_pv2_current
+          radiator_temp_91: sensor.ss_radiator_temperature
+          dc_transformer_temp_90: sensor.ss_dc_transformer_temperature
+          battery_temp_182: sensor.ss_battery_temperature
+          remaining_solar: sensor.solcast_pv_forecast_forecast_remaining_today
+          essential_load1: sensor.heat_pump_power
+          essential_load2: sensor.ev_charger_power
+          essential_load3: sensor.total_lights_power
+          energy_cost_buy: sensor.nordpool_with_vat_and_tarifss
+          energy_cost_sell: sensor.nordpool_kwh_ee_eur_3_10_0
+          load_power_L1: sensor.ss_load_l1_power
+          load_power_L2: sensor.ss_load_l2_power
+          load_power_L3: sensor.ss_load_l3_power
+          environment_temp: sensor.tempest_st_00102665_temperature
+          grid_voltage: sensor.ss_grid_voltage
+          solar_sell_247: switch.ss_solar_export
+          pv2_power_187: sensor.ss_pv2_power
+          grid_ct_power_total: sensor.ss_grid_ct_power
+          prog1_time: select.ss_prog1_time
+          prog1_capacity: number.ss_prog1_capacity
+          prog1_charge: select.ss_prog1_charge
+          prog2_time: select.ss_prog2_time
+          prog2_capacity: number.ss_prog2_capacity
+          prog2_charge: select.ss_prog2_charge
+          prog3_time: select.ss_prog3_time
+          prog3_capacity: number.ss_prog3_capacity
+          prog3_charge: select.ss_prog3_charge
+          prog4_time: select.ss_prog4_time
+          prog4_capacity: number.ss_prog4_capacity
+          prog4_charge: select.ss_prog4_charge
+          prog5_time: select.ss_prog5_time
+          prog5_capacity: number.ss_prog5_capacity
+          prog5_charge: select.ss_prog5_charge
+          prog6_time: select.ss_prog6_time
+          prog6_capacity: number.ss_prog6_capacity
+          prog6_charge: select.ss_prog6_charge
+          total_pv_generation: sensor.ss_total_pv_energy
+          max_sell_power: number.ss_export_limit_power
+        show_battery: false
+        show_grid: true
+        panel_mode: false
+        dynamic_line_width: true
+        max_line_width: 4
+        card_width: '800'
+      - type: custom:config-template-card
+        variables:
+          hours: '`${states[''input_number.total_nordpool_hours_available''].state -1}h`'
+        entities:
+          - input_number.nordpool_available_hours
+        card:
+          type: custom:apexcharts-card
+          graph_span: ${hours}
+          span:
+            start: minute
+          header:
+            show: true
+            title: EMHASS  Optimization Plan
+            show_states: true
+            colorize_states: true
+          now:
+            show: false
+            label: now
+          yaxis:
+            - min: -7000
+              max: 13000
+              decimals: 2
+              apex_config:
+                forceNiceScale: true
+                tick_amount: 4
+          series:
+            - entity: sensor.p_pv_forecast
+              curve: stepline
+              stroke_width: 2
+              color: '#FFD966'
+              show:
+                in_header: false
+                legend_value: false
+              data_generator: |
+                return entity.attributes.forecasts.map((entry) => {
+                  return [new Date(entry.date), entry.p_pv_forecast];
+                });
+            - entity: sensor.p_load_forecast
+              curve: stepline
+              type: line
+              color: '#5AB4DE'
+              show:
+                in_header: false
+                legend_value: false
+              stroke_width: 2
+              data_generator: |
+                return entity.attributes.forecasts.map((entry) => {
+                  return [new Date(entry.date), entry.p_load_forecast];
+                });
+            - entity: sensor.p_grid_forecast
+              curve: stepline
+              color: '#FF7E7E'
+              type: area
+              show:
+                in_header: false
+                legend_value: false
+              stroke_width: 1
+              data_generator: |
+                return entity.attributes.forecasts.map((entry) => {
+                  return [new Date(entry.date), entry.p_grid_forecast];
+                });
+            - entity: sensor.p_batt_forecast
+              curve: stepline
+              color: '#8CC63F'
+              type: area
+              show:
+                in_header: false
+                legend_value: false
+              stroke_width: 1
+              data_generator: >
+                return entity.attributes.battery_scheduled_power.map((entry) =>
+                {
+                  return [new Date(entry.date), entry.p_batt_forecast];
+                });
+            - entity: sensor.total_cost_fun_value
+              unit: €
+              name: Plan Value
+              show:
+                legend_value: false
+                in_chart: false
+            - entity: sensor.solcast_pv_forecast_forecast_today
+              unit: kWh
+              name: Solar Production Forecast
+              show:
+                legend_value: false
+                in_chart: false
+          view_layout:
+            position: main
+      - type: custom:config-template-card
+        variables:
+          hours: '`${states[''input_number.total_nordpool_hours_available''].state -1}h`'
+        entities:
+          - input_number.nordpool_available_hours
+        card:
+          type: custom:apexcharts-card
+          graph_span: ${hours}
+          experimental:
+            color_threshold: true
+          span:
+            start: minute
+          header:
+            show: true
+            title: EMHASS Battery SOC Plan
+            show_states: true
+            colorize_states: true
+          series:
+            - entity: sensor.soc_batt_forecast
+              float_precision: 2
+              type: area
+              yaxis_id: second
+              show:
+                extremas: true
+                in_header: before_now
+                legend_value: false
+              color: '#8CC63F'
+              stroke_width: 1
+              name: battery SOC
+              data_generator: |
+                return entity.attributes.battery_scheduled_soc.map((entry) => { 
+                  return [new Date(entry.date), entry.soc_batt_forecast]; });
+          yaxis:
+            - id: first
+              decimals: 1
+              min: 0
+              apex_config:
+                tickAmount: 2
+            - id: second
+              decimals: 1
+              max: 100
+              min: 0
+              apex_config:
+                tickAmount: 2
+          view_layout:
+            position: main
+      - type: custom:config-template-card
+        variables:
+          max_import_price: '`${states["input_number.norpool_highest_import_price"].state}+0.05`'
+          span: |
+            tv => {
+              if (tv == true) {
+                return '`48h`';
+              } 
+              return '`24h`';
+            }
+          tomorrow_valid: >-
+            states['sensor.nordpool_kwh_ee_eur_99_10_0'].attributes.tomorrow_valid
+        entities:
+          - input_number.norpool_highest_import_price
+          - sensor.nordpool_kwh_ee_eur_99_10_0
+        card:
+          type: custom:apexcharts-card
+          graph_span: ${span(tomorrow_valid)}
+          yaxis:
+            - id: y1
+              min: -0.02
+          apex_config:
+            chart:
+              height: 340px
+          show:
+            last_updated: true
+          experimental:
+            color_threshold: true
+          header:
+            title: Electricity prices
+            show: true
+            show_states: true
+            colorize_states: true
+          span:
+            start: day
+          now:
+            show: true
+            label: Now
+          series:
+            - entity: sensor.nordpool_kwh_ee_eur_99_10_0
+              float_precision: 3
+              name: Export
+              show:
+                extremas: true
+                in_header: raw
+                header_color_threshold: true
+              type: column
+              data_generator: >
+                return (entity.attributes.raw_today.map((start, index) => {
+                  return [new Date(start["start"]).getTime(), entity.attributes.raw_today[index]["value"]];
+                })).concat(entity.attributes.raw_tomorrow.map((start, index) =>
+                {
+
+                return [new Date(start["start"]).getTime(),
+                entity.attributes.raw_tomorrow[index]["value"]];
+
+                }));
+              color_threshold:
+                - value: -1
+                  color: '#007bff'
+                  opacity: 1
+                - value: 0
+                  color: '#28a745'
+                  opacity: 1
+                - value: 0.05
+                  color: '#ffed4a'
+                  opacity: 1
+                - value: 0.1
+                  color: '#fd7e14'
+                - value: 0.2
+                  color: '#dc3545'
+            - entity: sensor.nordpool_import
+              float_precision: 3
+              name: Import
+              show:
+                extremas: true
+                in_header: raw
+                header_color_threshold: true
+              type: line
+              stroke_width: 2
+              data_generator: >
+                return (entity.attributes.raw_today.map((start, index) => {
+                  return [new Date(start["start"]).getTime(), entity.attributes.raw_today[index]["value"]];
+                })).concat(entity.attributes.raw_tomorrow.map((start, index) =>
+                {
+
+                return [new Date(start["start"]).getTime(),
+                entity.attributes.raw_tomorrow[index]["value"]];
+
+                }));
+              color_threshold:
+                - value: 0
+                  color: '#28a745'
+                - value: ${parseFloat(max_import_price)}
+                  color: '#28a745'
+                - value: ${parseFloat(max_import_price)}
+                  color: '#fd7e14'
+      - type: custom:apexcharts-card
+        view_layout:
+          grid-area: solar
+        header:
+          show: true
+          standard_format: true
+          show_states: true
+          colorize_states: true
+        apex_config:
+          chart:
+            height: 300px
+          tooltip:
+            enabled: true
+            shared: true
+            followCursor: true
+        graph_span: 4d
+        now:
+          show: true
+          label: Now
+        span:
+          start: day
+          offset: '-1day'
+        all_series_config:
+          type: area
+          opacity: 0.3
+          stroke_width: 1
+        series:
+          - entity: sensor.total_pv_power
+            name: Solar Power
+            float_precision: 3
+            color: '#FFD966'
+            yaxis_id: kWh
+            unit: kW
+            transform: return x/1000;
+            extend_to: now
+            show:
+              legend_value: true
+              in_header: false
+            group_by:
+              func: avg
+              duration: 5m
+          - entity: sensor.solcast_pv_forecast_forecast_today
+            name: Solar Forecast (D1)
+            extend_to: false
+            color: '#FFF2CC'
+            opacity: 0.3
+            stroke_width: 0
+            yaxis_id: kWh
+            show:
+              legend_value: false
+              in_header: false
+            data_generator: |
+              return entity.attributes.detailedForecast.map((entry) => {
+                    return [new Date(entry.period_start), entry.pv_estimate];
+                  });
+          - entity: sensor.solcast_pv_forecast_forecast_tomorrow
+            name: Solar Forecast (D2)
+            float_precision: 3
+            extend_to: false
+            color: '#FFF2CC'
+            opacity: 0.3
+            stroke_width: 0
+            yaxis_id: kWh
+            show:
+              legend_value: false
+              in_header: false
+            data_generator: |
+              return entity.attributes.detailedForecast.map((entry) => {
+                    return [new Date(entry.period_start), entry.pv_estimate];
+                  });
+          - entity: sensor.solcast_pv_forecast_forecast_day_3
+            name: Solar Forecast (D3)
+            float_precision: 3
+            extend_to: false
+            color: '#FFF2CC'
+            opacity: 0.3
+            stroke_width: 0
+            yaxis_id: kWh
+            show:
+              legend_value: false
+              in_header: false
+            data_generator: |
+              return entity.attributes.detailedForecast.map((entry) => {
+                    return [new Date(entry.period_start), entry.pv_estimate];
+                  });
+          - entity: sensor.solcast_pv_forecast_forecast_today
+            yaxis_id: header_only
+            name: Solar Forecast (D1)
+            color: '#FFD966'
+            show:
+              legend_value: true
+              in_header: true
+              in_chart: false
+          - entity: sensor.solcast_pv_forecast_forecast_remaining_today
+            yaxis_id: header_only
+            name: Forecast (D1 Remaining)
+            color: '#FFD966'
+            show:
+              legend_value: true
+              in_header: true
+              in_chart: false
+          - entity: sensor.solcast_pv_forecast_forecast_tomorrow
+            yaxis_id: header_only
+            name: Forecast (D2)
+            color: '#FFF2CC'
+            show:
+              legend_value: true
+              in_header: true
+              in_chart: false
+          - entity: sensor.solcast_pv_forecast_forecast_day_3
+            yaxis_id: header_only
+            name: Solar Forecast (D3)
+            color: '#FFF2CC'
+            show:
+              legend_value: true
+              in_header: true
+              in_chart: false
+          - entity: sensor.solcast_pv_forecast_api_last_polled
+            yaxis_id: header_only
+            name: Forecast (Last Update)
+            color: green
+            unit: ' min.'
+            transform: return ((Date.now()) - (new Date(x).getTime())) / 60 / 60 / 24
+            show:
+              legend_value: true
+              in_header: true
+              in_chart: false
+        yaxis:
+          - id: capacity
+            show: true
+            opposite: true
+            decimals: 0
+            max: 100
+            min: 0
+            apex_config:
+              tickAmount: 5
+          - id: kWh
+            show: true
+            min: 0
+            apex_config:
+              tickAmount: 5
+          - id: header_only
+            show: false
+      - type: custom:apexcharts-card
+        graph_span: 31d
+        span:
+          start: month
+        stacked: true
+        header:
+          show: true
+          title: PV Savings Current Month
+          show_states: true
+          colorize_states: true
+        series:
+          - entity: sensor.pv_own_usage_benefit_daily
+            name: Own usage
+            yaxis_id: first
+            type: column
+            group_by:
+              func: max
+              duration: 1d
+            show:
+              in_header: false
+              legend_value: false
+          - entity: sensor.pv_to_grid_benefit_daily
+            name: To Grid
+            yaxis_id: first
+            type: column
+            group_by:
+              func: max
+              duration: 1d
+            show:
+              in_header: false
+              legend_value: false
+          - entity: sensor.total_pv_daily_benefit
+            name: Total
+            yaxis_id: first
+            type: line
+            stroke_width: 0
+            unit: €
+            show:
+              extremas: true
+              in_header: false
+              legend_value: false
+            group_by:
+              func: max
+              duration: 1d
+          - entity: sensor.total_pv_monthly_benefit
+            unit: €
+            yaxis_id: second
+            name: Total
+            show:
+              legend_value: false
+              in_chart: false
+          - entity: sensor.pv_own_usage_benefit_monthly
+            unit: €
+            yaxis_id: second
+            name: Own Usage
+            show:
+              legend_value: false
+              in_chart: false
+          - entity: sensor.pv_to_grid_benefit_monthly
+            unit: €
+            yaxis_id: second
+            name: PV to Grid
+            show:
+              legend_value: false
+              in_chart: false
+        yaxis:
+          - id: first
+            decimals: 2
+            apex_config:
+              tickAmount: 2
+              logarithmic: false
+          - id: second
+            show: false
+      - type: vertical-stack
+        cards:
+          - show_name: true
+            show_icon: false
+            type: button
+            tap_action:
+              action: call-service
+              service: rest_command.naive_mpc_optim
+              target: {}
+            name: MPC Optimization
+            show_state: false
+          - show_name: true
+            show_icon: false
+            type: button
+            tap_action:
+              action: call-service
+              service: rest_command.ml_forecast_model_predict
+              target: {}
+            name: ML Forecast Model Predict
+            show_state: false
+          - show_name: true
+            show_icon: false
+            type: button
+            tap_action:
+              action: call-service
+              service: rest_command.ml_forecast_model_fit
+              target: {}
+            name: ML Forecast Model Fit
+            show_state: false
+          - show_name: true
+            show_icon: false
+            type: button
+            tap_action:
+              action: call-service
+              service: rest_command.ml_forecast_model_tune
+              target: {}
+            name: ML Forecast Model Tune
+            show_state: false
+          - show_name: true
+            show_icon: false
+            type: button
+            tap_action:
+              action: call-service
+              service: rest_command.dayahead_optim
+              target: {}
+            name: Dayahead Optimization
+            show_state: false
+          - show_name: true
+            show_icon: false
+            type: button
+            tap_action:
+              action: call-service
+              service: rest_command.publish_data
+              target: {}
+            name: Publish Data
