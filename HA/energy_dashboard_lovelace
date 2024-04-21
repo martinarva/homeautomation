@@ -302,8 +302,11 @@ views:
             states['sensor.nordpool_kwh_ee_eur_99_10_0'].attributes.tomorrow_valid
           min: |
             min => {
-              const minValue = parseFloat(min_value);
-              return minValue < 0 ? `${minValue}` : '0';
+              const minValue = parseFloat(states['sensor.nordpool_kwh_ee_eur_99_10_0'].attributes.min);
+              if (minValue < 0) {
+                return `${minValue}`;
+              }
+              return '0';
             }
           min_value: states['sensor.nordpool_kwh_ee_eur_99_10_0'].attributes.min
         entities:
@@ -314,7 +317,7 @@ views:
           graph_span: ${span(tomorrow_valid)}
           yaxis:
             - id: y1
-              min: -0.02
+              min: ${parseFloat(min(min_value))}
           apex_config:
             chart:
               height: 340px
@@ -323,7 +326,7 @@ views:
           experimental:
             color_threshold: true
           header:
-            title: ${min(min_value)}
+            title: Electricity Price
             show: true
             show_states: true
             colorize_states: true
