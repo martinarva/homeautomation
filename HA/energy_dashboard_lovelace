@@ -1,6 +1,12 @@
 background: var(--background-image)
 title: Home
 views:
+  - theme: Backend-selected
+     path: default_view
+     title: Home
+     icon: mdi:home-circle
+     badges: []
+     cards:
   - title: EMHASS
     path: emhass
     icon: mdi:home-lightning-bolt-outline
