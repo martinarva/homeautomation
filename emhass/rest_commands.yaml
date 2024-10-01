@@ -13,17 +13,18 @@ rest_command:
     payload: >-
       {
         "load_cost_forecast": {{
-          ((state_attr('sensor.nordpool_with_vat_and_tarifss', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_with_vat_and_tarifss', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:24]) | tojson
+          ((state_attr('sensor.nordpool_import', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_import', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:24]) | tojson
         }},
         "prod_price_forecast": {{
-          ((state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:24]) | tojson
+          ((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:24]) | tojson
         }},
         "prediction_horizon": {{
-          (min(24, (((state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
+          (min(24, (((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
         }},
         "pv_power_forecast": {{
           (([states('sensor.solcast_pv_forecast_power_now')|int(0)] + state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list + state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list) | tojson)
-        }}
+        }},
+        "soc_init": {{ (states('sensor.ss_battery_soc')|int(0))/100 }}
       }
 
   naive_mpc_optim:
@@ -33,17 +34,25 @@ rest_command:
     payload: >-
       {
         "load_cost_forecast": {{
-          ((state_attr('sensor.nordpool_with_vat_and_tarifss', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_with_vat_and_tarifss', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
+          ((state_attr('sensor.nordpool_import', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_import', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
         }},
         "prod_price_forecast": {{
-          ((state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
+          ((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
         }},
         "prediction_horizon": {{
-          (min(48, (((state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_3_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
+          (min(48, (((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
         }},
         "pv_power_forecast": {{
           (([states('sensor.solcast_pv_forecast_power_now')|int(0)] + state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list + state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list) | tojson)
-        }}    
+        }},
+        "soc_init": {{ 
+          (states('sensor.ss_battery_soc')|int(0))/100 
+        }},
+        "def_total_hours":[{{ states('sensor.i3s_94_estimated_charge_time')|int(0) }},0,0],
+        "def_end_timestep":[{{ states('sensor.i3s_hours_until_departure')|int(0) }},0,0],
+        "var_model": "sensor.ss_load_power_without_deferrable",
+        "alpha": 1,
+        "beta": 0
       }
 
   ml_forecast_model_fit:
@@ -52,9 +61,9 @@ rest_command:
     content_type: 'application/json'
     payload: >-
       {
-        "days_to_retrieve": 20,
+        "days_to_retrieve": 16,
         "model_type": "load_forecast",
-        "var_model": "sensor.ss_load_power",
+        "var_model": "sensor.ss_load_power_without_deferrable",
         "sklearn_model": "KNeighborsRegressor",
         "num_lags": 48,
         "split_date_delta": "48h",
@@ -67,9 +76,9 @@ rest_command:
     content_type: 'application/json'
     payload: >-
       {
-        "days_to_retrieve": 20,
+        "days_to_retrieve": 16,
         "model_type": "load_forecast",
-        "var_model": "sensor.ss_load_power",
+        "var_model": "sensor.ss_load_power_without_deferrable",
         "sklearn_model": "KNeighborsRegressor",
         "num_lags": 48,
         "split_date_delta": "48h",
@@ -83,6 +92,142 @@ rest_command:
     payload: >-
       {
         "model_type": "load_forecast",
-        "var_model": "sensor.ss_load_power",
+        "var_model": "sensor.ss_load_power_without_deferrable",
+        "num_lags": 48
+      }
+
+############EMHASS THERMAL##########
+  emhass_thermal_dayahead_optim:
+    url: http://192.168.1.35:5002/action/dayahead-optim
+    method: POST
+    content_type: 'application/json'
+    payload: >-
+      {
+        "load_cost_forecast": {{
+          ((state_attr('sensor.nordpool_import', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_import', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:24]) | tojson
+        }},
+        "prod_price_forecast": {{
+          ((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:24]) | tojson
+        }},
+        "prediction_horizon": {{
+          (min(24, (((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
+        }},
+        "pv_power_forecast": {{
+          (([states('sensor.solcast_pv_forecast_power_now')|int(0)] + state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list + state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list) | tojson)
+        }},
+        "soc_init": {{ (states('sensor.ss_battery_soc')|int(0))/100 }}
+      }
+
+  emhass_thermal_naive_mpc_optim:
+    url: http://192.168.1.35:5002/action/naive-mpc-optim
+    method: POST
+    content_type: 'application/json'
+    payload: >-
+      {
+        "load_cost_forecast": {{
+          ((state_attr('sensor.nordpool_import', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_import', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
+        }},
+        "prod_price_forecast": {{
+          ((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
+        }},
+        "prediction_horizon": {{
+          (min(48, (((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
+        }},
+        "pv_power_forecast": {{
+          (([states('sensor.solcast_pv_forecast_power_now')|int(0)] + state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list + state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list) | tojson)
+        }},
+        "soc_init": {{ 
+          (states('sensor.ss_battery_soc')|int(0))/100 
+        }},
+        "def_total_hours":[{{ states('sensor.i3s_94_estimated_charge_time')|int(0) }},0,0],
+        "def_end_timestep":[{{ states('sensor.i3s_hours_until_departure')|int(0) }},0,0],
+        "var_model": "sensor.ss_load_power_without_deferrable",
+        "alpha": 1,
+        "beta": 0
+      }
+
+  emhass_thermal_naive_mpc_optim_thermal:
+    url: http://192.168.1.35:5002/action/naive-mpc-optim
+    method: POST
+    content_type: 'application/json'
+    payload: >-
+      {
+        "load_cost_forecast": {{
+          ((state_attr('sensor.nordpool_import', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_import', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
+        }},
+        "prod_price_forecast": {{
+          ((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today') | map(attribute='value') | list  + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value') | list)[now().hour:][:48]) | tojson
+        }},
+        "prediction_horizon": {{
+          (min(24, (((state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_today')|map(attribute='value')|list + state_attr('sensor.nordpool_kwh_ee_eur_99_10_0', 'raw_tomorrow') | map(attribute='value')| list)[now().hour:][:48]|list|length)))) | tojson
+        }},
+        "pv_power_forecast": {{
+          (([states('sensor.solcast_pv_forecast_power_now')|int(0)] + state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list + state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedHourly')|selectattr('period_start','gt',utcnow()) | map(attribute='pv_estimate')|map('multiply',1000)|map('int')|list) | tojson)
+        }},
+        "soc_init": {{ 
+          (states('sensor.ss_battery_soc')|int(0))/100 
+        }},
+        "def_total_hours": [{{ states('sensor.i3s_94_charging_hours_needed')|int(0) }},0,0],
+        "def_end_timestep":[{{ states('sensor.i3s_hours_until_departure')|int(0) }},0,0],
+        "P_deferrable_nom":[2380,4000,0],
+        "def_load_config": [
+          {},
+          {
+            "thermal_config": {
+              "heating_rate": 1.3,
+              "cooling_constant": 0.007974,
+              "overshoot_temperature": {{ (states('sensor.alumine_korrus_current_temperature') | float) + 1.0 }},
+              "start_temperature": {{ states('sensor.alumine_korrus_current_temperature') }},
+              "desired_temperatures": [22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22, 22]
+            }
+          },
+          {}
+        ],
+        "outdoor_temperature_forecast": {{
+          (state_attr('sensor.local_weather_forecast_hourly', 'raw_data') | map(attribute='temperature') | list)[0:24] | tojson
+        }},
+        "var_model": "sensor.ss_load_power_without_deferrable",
+        "alpha": 1,
+        "beta": 0
+      }
+
+  emhass_thermal_ml_forecast_model_fit:
+    url: http://192.168.1.35:5002/action/forecast-model-fit
+    method: POST
+    content_type: 'application/json'
+    payload: >-
+      {
+        "days_to_retrieve": 16,
+        "model_type": "load_forecast",
+        "var_model": "sensor.ss_load_power_without_deferrable",
+        "sklearn_model": "KNeighborsRegressor",
+        "num_lags": 48,
+        "split_date_delta": "48h",
+        "perform_backtest": "True"
+      }
+
+  emhass_thermal_ml_forecast_model_tune:
+    url: http://192.168.1.35:5002/action/forecast-model-tune
+    method: POST
+    content_type: 'application/json'
+    payload: >-
+      {
+        "days_to_retrieve": 16,
+        "model_type": "load_forecast",
+        "var_model": "sensor.ss_load_power_without_deferrable",
+        "sklearn_model": "KNeighborsRegressor",
+        "num_lags": 48,
+        "split_date_delta": "48h",
+        "perform_backtest": "True"
+      }
+
+  emhass_thermal_ml_forecast_model_predict:
+    url: http://192.168.1.35:5002/action/forecast-model-predict
+    method: POST
+    content_type: 'application/json'
+    payload: >-
+      {
+        "model_type": "load_forecast",
+        "var_model": "sensor.ss_load_power_without_deferrable",
         "num_lags": 48
       }
