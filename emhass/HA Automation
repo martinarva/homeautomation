@@ -1,0 +1,633 @@
+alias: "BATT: control EMHASS automation"
+description: ""
+mode: restart
+triggers:
+  - entity_id:
+      - sensor.p_batt_forecast
+    trigger: state
+  - entity_id:
+      - sensor.p_grid_forecast
+    trigger: state
+conditions:
+  - condition: or
+    conditions:
+      - condition: state
+        entity_id: sensor.optim_status
+        state: Optimal
+        enabled: true
+      - condition: numeric_state
+        entity_id: sensor.ss_battery_soc
+        below: 10
+  - condition: state
+    entity_id: input_select.battery_automation_selector
+    state: EMHASS
+actions:
+  - delay:
+      hours: 0
+      minutes: 0
+      seconds: 5
+      milliseconds: 0
+    enabled: true
+  - choose:
+      - conditions:
+          - condition: or
+            conditions:
+              - condition: numeric_state
+                entity_id: sensor.p_pv_curtailment
+                above: 0
+              - condition: and
+                conditions:
+                  - condition: template
+                    value_template: "{{ states('sensor.p_grid_forecast') | float == 0 }}"
+                  - condition: numeric_state
+                    entity_id: sensor.p_pv_forecast
+                    above: 0
+                  - condition: numeric_state
+                    entity_id: sensor.p_batt_forecast
+                    below: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: No Grid or Gen
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "10"
+            action: number.set_value
+          - target:
+              entity_id: number.ss_battery_max_charge_current
+            data:
+              value: 240
+            action: number.set_value
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Zero Export
+            action: select.select_option
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: PV > Battery
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: PV > Battery
+      - conditions:
+          - condition: template
+            value_template: "{{ states('sensor.p_pv_forecast') | float == 0 }}"
+          - condition: numeric_state
+            entity_id: sensor.p_batt_forecast
+            below: 0
+          - condition: numeric_state
+            entity_id: sensor.p_grid_forecast
+            above: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Zero Export
+            action: select.select_option
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: Allow Grid
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "100"
+            action: number.set_value
+          - target:
+              entity_id: number.ss_battery_max_charge_current
+            data:
+              value: |
+                {{
+                  (
+                    [
+                      (
+                        states('sensor.p_batt_forecast')|float(0)|abs 
+                        / 
+                       56.8
+                      )|round(0, 'ceil'),
+                      240
+                    ]|sort
+                  )[0]
+                }}
+            action: number.set_value
+          - target:
+              entity_id:
+                - select.ss_grid_peak_shaving
+            data:
+              option: Enable
+            action: select.select_option
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: Grid > Battery
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: Grid > Battery
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.p_pv_forecast
+            above: 0
+          - condition: template
+            value_template: "{{ states('sensor.p_batt_forecast') | float == 0 }}"
+          - condition: numeric_state
+            entity_id: sensor.p_grid_forecast
+            below: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: No Grid or Gen
+            action: select.select_option
+          - target:
+              entity_id: number.ss_battery_max_charge_current
+            data:
+              value: "0"
+            action: number.set_value
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Zero Export
+            action: select.select_option
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: PV > Grid
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: PV > Grid
+      - conditions:
+          - condition: template
+            value_template: "{{ states('sensor.p_pv_forecast') | float == 0 }}"
+          - condition: numeric_state
+            entity_id: sensor.p_batt_forecast
+            above: 0
+          - condition: numeric_state
+            entity_id: sensor.p_grid_forecast
+            below: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: No Grid or Gen
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "10"
+            action: number.set_value
+          - target:
+              entity_id:
+                - number.ss_prog1_power
+                - number.ss_prog2_power
+                - number.ss_prog3_power
+                - number.ss_prog4_power
+                - number.ss_prog5_power
+                - number.ss_prog6_power
+            data:
+              value: "{{ (states('sensor.p_batt_forecast')|float(0)|abs / 0.95) }}"
+            action: number.set_value
+          - target:
+              entity_id:
+                - select.ss_grid_peak_shaving
+            data:
+              option: Disable
+            action: select.select_option
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Allow Export
+            action: select.select_option
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: Battery > Grid
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: Battery > Grid
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.p_pv_forecast
+            above: 0
+          - condition: numeric_state
+            entity_id: sensor.p_batt_forecast
+            below: 0
+          - condition: numeric_state
+            entity_id: sensor.p_grid_forecast
+            below: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Zero Export
+            action: select.select_option
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: No Grid or Gen
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "10"
+            action: number.set_value
+          - target:
+              entity_id: number.ss_battery_max_charge_current
+            data:
+              value: |
+                {{
+                  (
+                    [
+                      (
+                        states('sensor.p_batt_forecast')|float(0)|abs 
+                        / 
+                       56.8
+                      )|round(0, 'ceil'),
+                      240
+                    ]|sort
+                  )[0]
+                }}
+            action: number.set_value
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: PV > Battery & Grid
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: PV > Battery & Grid
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.p_pv_forecast
+            above: 0
+          - condition: numeric_state
+            entity_id: sensor.p_batt_forecast
+            above: 0
+          - condition: numeric_state
+            entity_id: sensor.p_grid_forecast
+            below: 0
+        sequence:
+          - data:
+              option: Allow Export
+            action: select.select_option
+            target:
+              entity_id: select.ss_load_limit
+          - delay:
+              hours: 0
+              minutes: 0
+              seconds: 1
+              milliseconds: 0
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: No Grid or Gen
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "10"
+            action: number.set_value
+          - target:
+              entity_id:
+                - number.ss_prog1_power
+                - number.ss_prog2_power
+                - number.ss_prog3_power
+                - number.ss_prog4_power
+                - number.ss_prog5_power
+                - number.ss_prog6_power
+            data:
+              value: "{{ (states('sensor.p_batt_forecast')|float(0)|abs / 0.95) }}"
+            action: number.set_value
+          - target:
+              entity_id:
+                - select.ss_grid_peak_shaving
+            data:
+              option: Disable
+            action: select.select_option
+          - target:
+              entity_id: number.ss_battery_max_charge_current
+            data:
+              value: "0"
+            action: number.set_value
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: PV & Battery > Grid
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: PV & Battery > Grid
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.p_pv_forecast
+            above: 0
+          - condition: numeric_state
+            entity_id: sensor.p_batt_forecast
+            below: 0
+          - condition: numeric_state
+            entity_id: sensor.p_grid_forecast
+            above: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Zero Export
+            action: select.select_option
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: Allow Grid
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "100"
+            action: number.set_value
+          - target:
+              entity_id: number.ss_battery_max_charge_current
+            data:
+              value: |
+                {{
+                  (
+                    [
+                      (
+                        states('sensor.p_batt_forecast')|float(0)|abs 
+                        / 
+                       56.8
+                      )|round(0, 'ceil'),
+                      240
+                    ]|sort
+                  )[0]
+                }}
+            action: number.set_value
+          - target:
+              entity_id:
+                - select.ss_grid_peak_shaving
+            data:
+              option: Enable
+            action: select.select_option
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: PV & Grid > Battery
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: PV & Grid > Battery
+      - conditions:
+          - condition: template
+            value_template: "{{ states('sensor.p_grid_forecast') | float == 0 }}"
+          - condition: numeric_state
+            entity_id: sensor.p_batt_forecast
+            above: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Zero Export
+            action: select.select_option
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: No Grid or Gen
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "10"
+            action: number.set_value
+          - target:
+              entity_id:
+                - number.ss_prog1_power
+                - number.ss_prog2_power
+                - number.ss_prog3_power
+                - number.ss_prog4_power
+                - number.ss_prog5_power
+                - number.ss_prog6_power
+            data:
+              value: "12000"
+            action: number.set_value
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: Battery > Load
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: Battery > Load
+      - conditions:
+          - condition: template
+            value_template: "{{ states('sensor.p_batt_forecast') | float == 0 }}"
+          - condition: numeric_state
+            entity_id: sensor.p_grid_forecast
+            above: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Zero Export
+            action: select.select_option
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: No Grid or Gen
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "100"
+            action: number.set_value
+          - target:
+              entity_id:
+                - number.ss_prog1_power
+                - number.ss_prog2_power
+                - number.ss_prog3_power
+                - number.ss_prog4_power
+                - number.ss_prog5_power
+                - number.ss_prog6_power
+            data:
+              value: "0"
+            action: number.set_value
+          - target:
+              entity_id:
+                - select.ss_grid_peak_shaving
+            data:
+              option: Enable
+            action: select.select_option
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: Grid > Load
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: Grid > Load
+      - conditions:
+          - condition: numeric_state
+            entity_id: sensor.p_batt_forecast
+            above: 0
+          - condition: numeric_state
+            entity_id: sensor.p_grid_forecast
+            above: 0
+        sequence:
+          - target:
+              entity_id:
+                - select.ss_load_limit
+            data:
+              option: Zero Export
+            action: select.select_option
+          - target:
+              entity_id:
+                - select.ss_prog1_charge
+                - select.ss_prog2_charge
+                - select.ss_prog3_charge
+                - select.ss_prog4_charge
+                - select.ss_prog5_charge
+                - select.ss_prog6_charge
+            data:
+              option: No Grid or Gen
+            action: select.select_option
+          - target:
+              entity_id:
+                - number.ss_prog1_capacity
+                - number.ss_prog2_capacity
+                - number.ss_prog3_capacity
+                - number.ss_prog4_capacity
+                - number.ss_prog5_capacity
+                - number.ss_prog6_capacity
+            data:
+              value: "10"
+            action: number.set_value
+          - target:
+              entity_id:
+                - number.ss_prog1_power
+                - number.ss_prog2_power
+                - number.ss_prog3_power
+                - number.ss_prog4_power
+                - number.ss_prog5_power
+                - number.ss_prog6_power
+            data:
+              value: "{{ (states('sensor.p_batt_forecast')|float(0)|abs / 0.95) }}"
+            action: number.set_value
+          - target:
+              entity_id:
+                - select.ss_grid_peak_shaving
+            data:
+              option: Enable
+            action: select.select_option
+          - action: input_select.select_option
+            metadata: {}
+            data:
+              option: Battery & Grid > Load
+            target:
+              entity_id: input_select.battery_mode_selector
+        alias: Battery & Grid > Load
