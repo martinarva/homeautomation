@@ -1,17 +1,17 @@
 // Instructions:
-    
-// SSH into your nibepi (ssh pi@<nibepiIP>; password: nibe)
-// Make a backup of config_node.js (cp /home/pi/.node-red/node_modules/node-red-contrib-nibepi/config_node.js /home/pi/.node-red/node_modules/node-red-contrib-nibepi/config_node_backup.js)
-// Remove config_node.js (rm /home/pi/.node-red/node_modules/node-red-contrib-nibepi/config_node.js)
-// Create a new config_node.js (nano /home/pi/.node-red/node_modules/node-red-contrib-nibepi/config_node.js)
-// Paste the code from GitHub (https://github.com/martinarva/homeautomation/blob/main/nibepi/config_node.js)
-// Modify the Home Assistant settings at the top of the file:
-// •    HA_BASE_URL: the full URL to your Home Assistant (include protocol and port). Example: http://192.168.1.50:8123/ or https://homeassistant.local:8123/
-// •    HA_TOKEN: a Home Assistant long-lived access token. Create one under your HA profile → Security → Long-lived access tokens, then paste the token string.
-// •    HA_ENTITY: the entity_id of your Nordpool integration (or template sensor). Example: sensor.nordpool_kwh_ee_eur_97_10_0
-// •    PRICE_TO_CENTS_MULTIPLIER: use 100 if your Nordpool sensor reports €/kWh and you want cents/öre. Adjust if your source already reports in cents/öre.
-// Save the file (CTRL + X in nano)
-// Restart Node-RED from the nibepi UI
+    // MAKE SURE YOU HAVE TURNED OFF READ-ONLY MODE IN NIBEPI UI
+// 1. SSH into your nibepi (ssh pi@<nibepiIP>; password: nibe)
+// 2. Make a backup of config_node.js (cp /home/pi/.node-red/node_modules/node-red-contrib-nibepi/config_node.js /home/pi/.node-red/node_modules/node-red-contrib-nibepi/config_node_backup.js)
+// 3. Remove config_node.js (rm /home/pi/.node-red/node_modules/node-red-contrib-nibepi/config_node.js)
+// 4. Create a new config_node.js (nano /home/pi/.node-red/node_modules/node-red-contrib-nibepi/config_node.js)
+// 5. Paste the code from GitHub (https://github.com/martinarva/homeautomation/blob/main/nibepi/config_node.js)
+// 6. Modify the Home Assistant settings at the top of the file:
+//     • HA_BASE_URL: the full URL to your Home Assistant (include protocol and port). Example: http://192.168.1.50:8123/ or https://homeassistant.local:8123/
+//     • HA_TOKEN: a Home Assistant long-lived access token. Create one under your HA profile → Security → Long-lived access tokens, then paste the token string.
+//     • HA_ENTITY: the entity_id of your Nordpool integration (or template sensor). Example: sensor.nordpool_kwh_ee_eur_97_10_0
+//     • PRICE_TO_CENTS_MULTIPLIER: use 100 if your Nordpool sensor reports €/kWh and you want cents/öre. Adjust if your source already reports in cents/öre.
+// 7. Save the file (CTRL + X in nano)
+// 8. Restart Node-RED from the nibepi UI
 
 
 
