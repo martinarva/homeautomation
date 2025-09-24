@@ -21,9 +21,10 @@ What you get (entities created beforehand in HA UI as empty helpers):
 
 Scheduling:
 - Runs on startup
-- Every 15 minutes outside 13:00–15:00 local
-- Every minute between 13:00–15:00 local (prices are typically published in this window; we poll more often only to catch the update promptly)
-
+- Every hour outside 14:00–15:00 local
+- Every 15 minutes during 14:00–15:00 local 
+  (prices are typically published in this window; we poll more often only to catch the update promptly)
+  
 Manual run:
 - Developer Tools → Services → call service: nordpool_update
 
@@ -185,9 +186,8 @@ def _map_export(array):
 
 
 @time_trigger("startup")
-@time_trigger("cron(0,15,30,45 0-12 * * *)")   # every 15 min outside 13–15
-@time_trigger("cron(0,15,30,45 15-23 * * *)")
-@time_trigger("cron(* 13-14 * * *)")           # every minute during 13:00–15:00 local
+@time_trigger("cron(0 0-13,15-23 * * *)")   # top of the hour, excluding 14:00
+@time_trigger("cron(0,15,30,45 14 * * *)")  # every 15 min during 14:00–14:59
 @service
 async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
     # overlap guard
