@@ -91,8 +91,8 @@ def _parse_utc(ts: str) -> dt.datetime:
     return dt.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
 
 @time_trigger("startup")
-@time_trigger("cron(minute=0,15,30,45, hour=0-12,15-23)")
-@time_trigger("cron(minute=0-59, hour=13-14)")
+@time_trigger("cron(0 0-13,15-23 * * *)")   # top of the hour, excluding 14:00
+@time_trigger("cron(0,15,30,45 14 * * *)")  # every 15 min during 14:00–14:59
 @service
 async def nordpool_update(area="EE", currency="EUR", resolution=15):
     """
