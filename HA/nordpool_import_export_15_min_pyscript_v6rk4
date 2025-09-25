@@ -1,30 +1,31 @@
 """
-NordPool 15-min (EE) — base, import & export prices via Pyscript
+NordPool 15-min (EE) via Pyscript — single raw_all stream with smart polling
 
-What you get (entities created beforehand in HA UI as empty helpers):
+Entities (create these 3 helper sensors in HA first):
 - sensor.nordpool_15_min_raw_pyscript
-  - state: current 15-min **market** price (€/kWh)
-  - attributes:
-      raw_today     : 15-min slots for local "today" (Europe/Tallinn)
-      raw_tomorrow  : 15-min slots for local "tomorrow" (only when published)
-      raw_all       : today + tomorrow (includes the extra spill hour across CET↔EE)
-      updatedAt     : timestamp in Europe/Tallinn of the **tomorrow** dataset publish time
-      unit_of_measurement, state_class
+  state  : current 15-min market price (€/kWh), derived from cached data if possible
+  attrs  : raw_all (local today + local tomorrow + spill hour)
+           updatedAt_tm_utc, updatedAt_tm_local (publish time of "tomorrow")
+           status_y, status_t, status_tm (Final / Preliminary / Missing / Corrected / Cancelled / Unknown(...))
+           areaStates_y, areaStates_t, areaStates_tm (raw areaStates from API)
+           slots_today, slots_tomorrow, slots_all, expected_slots_today, expected_slots_tomorrow
+           tomorrow_complete (bool)
+           last_fetch_at_local
 
 - sensor.nordpool_15_min_import_pyscript
-  - state: current 15-min **import** price after tariffs (€/kWh)
-  - attributes: same 15-min arrays, tariffed
+  state  : current 15-min import price after tariffs (€/kWh)
+  attrs  : raw_all (tariffed view), updatedAt_tm_* and status fields mirrored
 
 - sensor.nordpool_15_min_export_pyscript
-  - state: current 15-min **export** price (market price + export margin; no VAT), €/kWh
-  - attributes: same 15-min arrays, export-adjusted
+  state  : current 15-min export price (market + export margin; no VAT), €/kWh
+  attrs  : raw_all (export-adjusted view), updatedAt_tm_* and status fields mirrored
 
 Scheduling:
 - Runs on startup
-- Every hour outside 14:00–15:00 local
-- Every 15 minutes during 14:00–15:00 local 
-  (prices are typically published in this window; we poll more often only to catch the update promptly)
-  
+- Every 15 minutes (we decide inside whether to call the API)
+- We only chase "tomorrow" between 13:00–00:00 local, or when status_tm is not Final.
+  (Prices are typically published in this window; we poll more only to catch the update promptly.)
+
 Manual run:
 - Developer Tools → Services → call service: nordpool_update
 
@@ -32,6 +33,10 @@ Install:
 - Save as apps/pyscript/nordpool_15min.py (or any .py under pyscript/)
 - Create the 3 helper sensors listed above (IDs must match)
 - (Optional) Set HOLIDAY_CALENDAR below to your HA holiday calendar entity_id
+
+Notes:
+- raw_all includes the extra **spill hour** that local time gets across CET↔EE.
+- We avoid unnecessary API calls by checking completeness & status first.
 """
 
 import json
@@ -42,11 +47,11 @@ import random
 
 # ---------- Configuration ----------
 HOLIDAY_CALENDAR = "calendar.estonia"  # set to None to disable holiday logic (weekend/night remains)
-AREA      = "EE"
-CURRENCY  = "EUR"
-RESOLUTION= 15  # minutes; 15 from 2025-10-01
+AREA       = "EE"
+CURRENCY   = "EUR"
+RESOLUTION = 15  # minutes
 
-# Import tariff components (all values in EUR/kWh)
+# Import tariff components (EUR/kWh)
 IMPORT = {
     "alexela_marginaal": 0.0000,
     "taastuv":          0.0084,
@@ -56,10 +61,10 @@ IMPORT = {
     "vat":              1.24,    # multiplier
 }
 
-# Export margin (negative means we subtract margin from market price); no VAT on export
+# Export margin (negative → subtract from market). No VAT for export.
 EXPORT_MARGIN = -0.00167  # EUR/kWh
 
-# Target helper entities (must exist)
+# Target helper entities (must exist in HA)
 SENSOR_RAW    = "sensor.nordpool_15_min_raw_pyscript"
 SENSOR_IMPORT = "sensor.nordpool_15_min_import_pyscript"
 SENSOR_EXPORT = "sensor.nordpool_15_min_export_pyscript"
@@ -76,10 +81,10 @@ except Exception:
 API_BASE = "https://dataportal-api.nordpoolgroup.com/api/DayAheadPriceIndices"
 HEADERS  = {
     "Accept": "application/json",
-    "User-Agent": "HomeAssistant-Pyscript-Nordpool/1.1 (+nordpool_15_min_raw)"
+    "User-Agent": "HomeAssistant-Pyscript-Nordpool/1.3 (+nordpool_15_min_raw)"
 }
 
-# ---------- Helpers ----------
+# ---------- HTTP / parsing helpers ----------
 async def _fetch_date(session, date, area, currency, resolution) -> dict | None:
     url = (
         f"{API_BASE}?date={date}"
@@ -108,18 +113,34 @@ def _parse_utc(ts: str) -> dt.datetime:
 def _fmt_local(ts: dt.datetime) -> str:
     return ts.strftime("%Y-%m-%dT%H:%M:%S%z")
 
-def _parse_updated_local(val: str | None) -> str | None:
+def _parse_updated_pair(val: str | None):
+    """Return (utc_str, local_str) for updatedAt (or (None, None))."""
     if not val:
-        return None
+        return (None, None)
     try:
         ts = dt.datetime.fromisoformat(val.replace("Z", "+00:00"))
-        return _fmt_local(ts.astimezone(EE_TZ))
+        return (ts.strftime("%Y-%m-%dT%H:%M:%S%z"), _fmt_local(ts.astimezone(EE_TZ)))
     except Exception as ex:
         log.warning(f"⚠️ Failed to parse updatedAt '{val}': {ex}")
-        return val
+        return (val, val)
 
+def _status_for_area(data: dict | None, area: str) -> tuple[str, list]:
+    """Extract status string for AREA from areaStates[]."""
+    if not data:
+        return ("Missing", [])
+    area_states = data.get("areaStates") or []
+    found = "Unknown"
+    for row in area_states:
+        st = row.get("state")
+        areas = row.get("areas") or []
+        if area in areas and st:
+            found = st
+            break
+    return (found, area_states)
+
+# ---------- price transforms ----------
 def _is_offpeak(slot_start_local: dt.datetime) -> bool:
-    # Weekend (Sat=5, Sun=6), night (<07 or >=22), or all-day holiday via HA calendar entity
+    # Weekend (Sat=5, Sun=6), night (<07 or >=22), or all-day holiday via HA calendar
     if slot_start_local.weekday() >= 5:
         return True
     h = slot_start_local.hour
@@ -127,67 +148,96 @@ def _is_offpeak(slot_start_local: dt.datetime) -> bool:
         return True
     if HOLIDAY_CALENDAR:
         cal_state = state.get(HOLIDAY_CALENDAR)
-        cal_attr  = state.getattr(HOLIDAY_CALENDAR) or {}
-        # Consider "all_day" and same local date of the start_time
-        st = cal_attr.get("start_time")
-        all_day = cal_attr.get("all_day")
-        if cal_state == "on" and all_day and st:
+        attr = state.getattr(HOLIDAY_CALENDAR) or {}
+        if cal_state == "on" and attr.get("all_day") and attr.get("start_time"):
             try:
-                st_dt = dt.datetime.fromisoformat(st.replace("Z", "+00:00")).astimezone(EE_TZ)
-                if st_dt.date() == slot_start_local.date():
+                st = dt.datetime.fromisoformat(attr["start_time"].replace("Z", "+00:00")).astimezone(EE_TZ)
+                if st.date() == slot_start_local.date():
                     return True
             except Exception:
                 pass
     return False
 
 def _apply_import(price: float, slot_start_local: dt.datetime) -> float:
-    # price = market €/kWh → add tariffs, then VAT
-    if _is_offpeak(slot_start_local):
-        network = IMPORT["elektrilevi_88"]
-    else:
-        network = IMPORT["elektrilevi_p2ev"]
-    base = price + IMPORT["alexela_marginaal"] + IMPORT["taastuv"] + IMPORT["aktsiis"] + network
+    net = IMPORT["elektrilevi_88"] if _is_offpeak(slot_start_local) else IMPORT["elektrilevi_p2ev"]
+    base = price + IMPORT["alexela_marginaal"] + IMPORT["taastuv"] + IMPORT["aktsiis"] + net
     return base * IMPORT["vat"]
 
 def _apply_export(price: float) -> float:
-    # price = market €/kWh → add (negative) margin; no VAT
     return price + EXPORT_MARGIN
 
-def _build_attr_from(combined, day_start_local, day_end_local, allowed_sources):
-    # Build 15-min array between [day_start_local, day_end_local) using entries whose source in allowed_sources
-    res = []
-    for e in combined:
-        if e["src"] not in allowed_sources:
-            continue
-        if day_start_local <= e["sl"] < day_end_local:
-            res.append({"start": _fmt_local(e["sl"]), "end": _fmt_local(e["el"]), "value": e["p"]})
-    return res
-
-def _map_import(array):
+def _map_import(raw_all):
     out = []
-    for row in array:
+    for row in raw_all:
         try:
             start_dt = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
-            val = float(row["value"])
-            out.append({**row, "value": _apply_import(val, start_dt)})
+            v = float(row["value"])
+            out.append({**row, "value": _apply_import(v, start_dt)})
         except Exception:
             pass
     return out
 
-def _map_export(array):
+def _map_export(raw_all):
     out = []
-    for row in array:
+    for row in raw_all:
         try:
-            val = float(row["value"])
-            out.append({**row, "value": _apply_export(val)})
+            v = float(row["value"])
+            out.append({**row, "value": _apply_export(v)})
         except Exception:
             pass
     return out
 
+# ---------- slot utilities ----------
+def _expected_slots(start_local: dt.datetime, end_local: dt.datetime) -> int:
+    # 15-minute buckets; handles DST (92/96/100) by computing exact 900s steps
+    seconds = int((end_local - start_local).total_seconds())
+    return max(0, seconds // (15 * 60))
 
+def _count_slots_in_range(raw_all, start_local: dt.datetime, end_local: dt.datetime) -> int:
+    n = 0
+    for row in raw_all or []:
+        try:
+            sl = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
+            if start_local <= sl < end_local:
+                n += 1
+        except Exception:
+            continue
+    return n
+
+def _slice_slots(raw_all, start_local: dt.datetime, end_local: dt.datetime):
+    out = []
+    for row in raw_all or []:
+        try:
+            sl = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
+            if start_local <= sl < end_local:
+                out.append(row)
+        except Exception:
+            continue
+    return out
+
+# ---------- builder ----------
+def _combine_to_raw_all(combined, today0, raw_all_end):
+    def fmt(ts): return ts.strftime("%Y-%m-%dT%H:%M:%S%z")
+    return [
+        {"start": fmt(e["sl"]), "end": fmt(e["el"]), "value": e["p"]}
+        for e in combined
+        if (today0 <= e["sl"] < raw_all_end)
+    ]
+
+def _price_now_from_raw_all(raw_all, now_local):
+    for row in raw_all or []:
+        try:
+            sl = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
+            el = dt.datetime.strptime(row["end"],   "%Y-%m-%dT%H:%M:%S%z")
+            if sl <= now_local < el:
+                return float(row["value"])
+        except Exception:
+            continue
+    return None
+
+# ---------- main ----------
 @time_trigger("startup")
-@time_trigger("cron(0 0-13,15-23 * * *)")   # top of the hour, excluding 14:00
-@time_trigger("cron(0,15,30,45 14 * * *)")  # every 15 min during 14:00–14:59
+@time_trigger("period(minute=15)")   # every 15 minutes, we decide inside whether to fetch
 @service
 async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
     # overlap guard
@@ -199,24 +249,113 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
     try:
         await asyncio.sleep(random.uniform(0.0, 3.0))  # jitter
 
-        # CET delivery dates
-        now_cet = dt.datetime.now(dt.timezone.utc).astimezone(CET_TZ)
+        # Load previous cache/attrs
+        prev_attrs = state.getattr(SENSOR_RAW) or {}
+        cached_raw_all = prev_attrs.get("raw_all") or []
+        prev_status_t  = prev_attrs.get("status_t")
+        prev_status_tm = prev_attrs.get("status_tm")
+
+        # Local day bounds
+        now_utc   = dt.datetime.now(dt.timezone.utc)
+        now_local = now_utc.astimezone(EE_TZ)
+        today0    = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow0 = today0 + dt.timedelta(days=1)
+        day_after0= today0 + dt.timedelta(days=2)
+
+        # Spill hour computation (difference EE vs CET at tomorrow boundary)
+        spill_hours = int((EE_TZ.utcoffset(tomorrow0) - CET_TZ.utcoffset(tomorrow0)).total_seconds() // 3600)
+        spill_hours = max(0, spill_hours)
+        raw_all_end = day_after0 + dt.timedelta(hours=spill_hours)
+
+        # Slot counts from cache
+        slots_today_cached    = _count_slots_in_range(cached_raw_all, today0,   tomorrow0)
+        slots_tomorrow_cached = _count_slots_in_range(cached_raw_all, tomorrow0, day_after0)
+        expected_today        = _expected_slots(today0, tomorrow0)
+        expected_tomorrow     = _expected_slots(tomorrow0, day_after0)
+        tomorrow_window = (now_local.hour >= 13)  # only chase tm after 13:00 local
+
+        need_y_t = False
+        need_tm  = False
+
+        # Decide whether we need today/yesterday
+        if slots_today_cached < expected_today:
+            need_y_t = True
+        elif (prev_status_t and prev_status_t != "Final"):
+            need_y_t = True
+        else:
+            # Full day present → implicitly treat as Final
+            prev_status_t = prev_status_t or "Final"
+
+        # Decide whether we need tomorrow
+        if tomorrow_window:
+            if slots_tomorrow_cached < expected_tomorrow:
+                need_tm = True
+            elif (prev_status_tm and prev_status_tm != "Final"):
+                need_tm = True
+
+        combined = []
+        data_y = data_t = data_tm = None
+
+        # If nothing needed, we can compute current state from cache and exit early
+        if not need_y_t and not need_tm and cached_raw_all:
+            market_now = _price_now_from_raw_all(cached_raw_all, now_local)
+            # preserve updatedAt_tm from cache
+            base_attrs = {
+                **prev_attrs,
+                "raw_all": cached_raw_all,
+                "slots_today": slots_today_cached,
+                "slots_tomorrow": slots_tomorrow_cached,
+                "slots_all": len(cached_raw_all),
+                "expected_slots_today": expected_today,
+                "expected_slots_tomorrow": expected_tomorrow,
+                "tomorrow_complete": (slots_tomorrow_cached >= expected_tomorrow),
+                "last_fetch_at_local": prev_attrs.get("last_fetch_at_local"),
+            }
+            # states
+            state_import = _apply_import(market_now, now_local) if market_now is not None else None
+            state_export = _apply_export(market_now)             if market_now is not None else None
+
+            import_attrs = {
+                "raw_all": _map_import(cached_raw_all),
+                **{k: base_attrs.get(k) for k in (
+                    "updatedAt_tm_utc","updatedAt_tm_local","status_y","status_t","status_tm",
+                    "slots_today","slots_tomorrow","slots_all","expected_slots_today","expected_slots_tomorrow",
+                    "tomorrow_complete","last_fetch_at_local",
+                )},
+                "unit_of_measurement": "EUR/kWh",
+                "state_class": "measurement",
+            }
+            export_attrs = {
+                "raw_all": _map_export(cached_raw_all),
+                **{k: import_attrs[k] for k in import_attrs.keys() if k not in ("raw_all",)},
+            }
+
+            state.set(SENSOR_RAW,    market_now, new_attributes=base_attrs)
+            state.set(SENSOR_IMPORT, state_import, new_attributes=import_attrs)
+            state.set(SENSOR_EXPORT, state_export, new_attributes=export_attrs)
+            log.info("✅ No fetch needed; kept cache. Today=%d/%d, Tomorrow=%d/%d",
+                     slots_today_cached, expected_today, slots_tomorrow_cached, expected_tomorrow)
+            return
+
+        # We do need to fetch something
+        # Figure CET delivery dates (y, t, tm)
+        now_cet = now_utc.astimezone(CET_TZ)
         d_y  = (now_cet.date() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
         d_t  = (now_cet.date()).strftime("%Y-%m-%d")
         d_tm = (now_cet.date() + dt.timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # fetch
         try:
             async with aiohttp.ClientSession() as session:
-                data_y  = await _fetch_date(session, d_y,  area, currency, resolution)
-                data_t  = await _fetch_date(session, d_t,  area, currency, resolution)
-                data_tm = await _fetch_date(session, d_tm, area, currency, resolution)
+                if need_y_t:
+                    data_y = await _fetch_date(session, d_y,  area, currency, resolution)
+                    data_t = await _fetch_date(session, d_t,  area, currency, resolution)
+                if need_tm:
+                    data_tm = await _fetch_date(session, d_tm, area, currency, resolution)
         except Exception as e:
             log.error(f"❌ Session error: {e} — keeping last values")
             return
 
-        # combine entries
-        combined = []
+        # Combine entries (only from datasets we fetched)
         for origin, data in (("y", data_y), ("t", data_t), ("tm", data_tm)):
             if not data:
                 continue
@@ -224,97 +363,119 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
                 try:
                     su = _parse_utc(e["deliveryStart"])
                     eu = _parse_utc(e["deliveryEnd"])
-                    p  = float(e["entryPerArea"][area]) / 1000.0
+                    p  = float(e["entryPerArea"][area]) / 1000.0  # EUR/MWh → EUR/kWh
                     sl = su.astimezone(EE_TZ)
                     el = eu.astimezone(EE_TZ)
                     combined.append({"su": su, "eu": eu, "sl": sl, "el": el, "p": p, "src": origin})
                 except Exception as ex:
                     log.warning(f"⚠️ Skipping bad entry {e}: {ex}")
 
-        if not combined:
-            log.warning("⚠️ No entries from any day — keeping last values")
-            return
+        # If we fetched nothing (e.g., only tm outside window), keep cache
+        merged_raw_all = cached_raw_all[:]
 
-        # current state
-        now_utc  = dt.datetime.now(dt.timezone.utc)
-        now_loc  = now_utc.astimezone(EE_TZ)
-        today0   = now_loc.replace(hour=0, minute=0, second=0, microsecond=0)
-        tomorrow0= today0 + dt.timedelta(days=1)
-        day_after0 = today0 + dt.timedelta(days=2)
+        # If today/yesterday fetched → rebuild today's slice from API, keep any existing tomorrow slice from cache
+        if need_y_t and combined:
+            rebuilt_today = _combine_to_raw_all(combined, today0, tomorrow0)
+            # keep tomorrow part from cache
+            tomorrow_cached_slice = _slice_slots(cached_raw_all, tomorrow0, day_after0)
+            # include spill calculation window end
+            spill_tail = _slice_slots(cached_raw_all, day_after0, raw_all_end)
+            merged_raw_all = rebuilt_today + tomorrow_cached_slice + spill_tail
 
-        state_market = None
-        for e in combined:
-            if e["su"] <= now_utc < e["eu"]:
-                state_market = e["p"]
-                break
+        # If we fetched tm → rebuild tomorrow slice from API and merge into merged_raw_all
+        if need_tm and combined:
+            rebuilt_tm = _combine_to_raw_all(combined, tomorrow0, raw_all_end)
+            # remove old tomorrow+spill from merged_raw_all, then append fresh
+            kept_today = _slice_slots(merged_raw_all, today0, tomorrow0)
+            merged_raw_all = kept_today + rebuilt_tm
 
-        # arrays (base)
-        def fmt(ts): return ts.strftime("%Y-%m-%dT%H:%M:%S%z")
-        raw_today = [
-            {"start": fmt(e["sl"]), "end": fmt(e["el"]), "value": e["p"]}
-            for e in combined if (today0 <= e["sl"] < tomorrow0) and (e["src"] in ("y","t"))
-        ]
-        raw_tomorrow_tm = [
-            {"start": fmt(e["sl"]), "end": fmt(e["el"]), "value": e["p"]}
-            for e in combined if (tomorrow0 <= e["sl"] < day_after0) and (e["src"] == "tm")
-        ]
-        raw_all = [
-            {"start": fmt(e["sl"]), "end": fmt(e["el"]), "value": e["p"]}
-            for e in combined if (today0 <= e["sl"] < day_after0)
-        ]
+        # If neither branch added anything (e.g. API error) → keep cache
+        if not merged_raw_all:
+            merged_raw_all = cached_raw_all[:]
 
-        # updatedAt = only from tomorrow payload, in local time; else keep previous
-        prev_attrs = state.getattr(SENSOR_RAW) or {}
-        prev_updated_local = prev_attrs.get("updatedAt")
-        tm_updated_local = _parse_updated_local((data_tm or {}).get("updatedAt"))
+        # Sort just in case (by start)
+        try:
+            merged_raw_all.sort(key=lambda r: r["start"])
+        except Exception:
+            pass
 
+        # Recompute counts
+        slots_today    = _count_slots_in_range(merged_raw_all, today0,   tomorrow0)
+        slots_tomorrow = _count_slots_in_range(merged_raw_all, tomorrow0, day_after0)
+
+        # Determine statuses
+        status_y, areaStates_y   = _status_for_area(data_y,  area) if need_y_t else (prev_attrs.get("status_y") or "Unknown", prev_attrs.get("areaStates_y") or [])
+        status_t, areaStates_t   = _status_for_area(data_t,  area) if need_y_t else (prev_attrs.get("status_t") or ("Final" if slots_today>=expected_today else "Unknown"), prev_attrs.get("areaStates_t") or [])
+        status_tm, areaStates_tm = _status_for_area(data_tm, area) if need_tm  else (prev_attrs.get("status_tm") or ("Final" if slots_tomorrow>=expected_tomorrow else "Missing"), prev_attrs.get("areaStates_tm") or [])
+
+        # updatedAt for tomorrow only
+        upd_tm_utc_prev   = prev_attrs.get("updatedAt_tm_utc")
+        upd_tm_local_prev = prev_attrs.get("updatedAt_tm_local")
+        upd_tm_utc, upd_tm_local = (upd_tm_utc_prev, upd_tm_local_prev)
+        if data_tm:
+            raw_upd = data_tm.get("updatedAt")
+            if raw_upd:
+                upd_tm_utc, upd_tm_local = _parse_updated_pair(raw_upd)
+
+        # Current price (try merged_raw_all first)
+        market_now = _price_now_from_raw_all(merged_raw_all, now_local)
+        if market_now is None and combined:
+            # fallback: compute from fresh combined windows if we can
+            market_now = None
+            for e in combined:
+                if e["su"] <= now_utc < e["eu"]:
+                    market_now = e["p"]
+                    break
+
+        # Build final attrs
         base_attrs = {
-            "raw_today": raw_today,
-            "raw_tomorrow": raw_tomorrow_tm,
-            "raw_all": raw_all,
-            "updatedAt": tm_updated_local or prev_updated_local,
+            "raw_all": merged_raw_all,
+            "updatedAt_tm_utc": upd_tm_utc,
+            "updatedAt_tm_local": upd_tm_local,
+            "status_y": status_y,
+            "status_t": status_t,
+            "status_tm": status_tm,
+            "areaStates_y": areaStates_y,
+            "areaStates_t": areaStates_t,
+            "areaStates_tm": areaStates_tm,
+            "slots_today": slots_today,
+            "slots_tomorrow": slots_tomorrow,
+            "slots_all": len(merged_raw_all),
+            "expected_slots_today": expected_today,
+            "expected_slots_tomorrow": expected_tomorrow,
+            "tomorrow_complete": (slots_tomorrow >= expected_tomorrow),
+            "last_fetch_at_local": _fmt_local(now_local),
             "unit_of_measurement": "EUR/kWh",
             "state_class": "measurement",
         }
 
-        # import/export states
-        state_import = _apply_import(state_market, now_loc) if state_market is not None else None
-        state_export = _apply_export(state_market)          if state_market is not None else None
-
-        # import/export arrays (no lambdas → no coroutines)
-        import_today    = _map_import(raw_today)
-        import_tomorrow = _map_import(raw_tomorrow_tm)
-        import_all      = _map_import(raw_all)
-
-        export_today    = _map_export(raw_today)
-        export_tomorrow = _map_export(raw_tomorrow_tm)
-        export_all      = _map_export(raw_all)
+        # States & mapped arrays
+        state_import = _apply_import(market_now, now_local) if market_now is not None else None
+        state_export = _apply_export(market_now)            if market_now is not None else None
 
         import_attrs = {
-            "raw_today": import_today,
-            "raw_tomorrow": import_tomorrow,
-            "raw_all": import_all,
-            "updatedAt": base_attrs["updatedAt"],
+            "raw_all": _map_import(merged_raw_all),
+            **{k: base_attrs[k] for k in (
+                "updatedAt_tm_utc","updatedAt_tm_local","status_y","status_t","status_tm",
+                "slots_today","slots_tomorrow","slots_all","expected_slots_today","expected_slots_tomorrow",
+                "tomorrow_complete","last_fetch_at_local",
+            )},
             "unit_of_measurement": "EUR/kWh",
             "state_class": "measurement",
         }
         export_attrs = {
-            "raw_today": export_today,
-            "raw_tomorrow": export_tomorrow,
-            "raw_all": export_all,
-            "updatedAt": base_attrs["updatedAt"],
-            "unit_of_measurement": "EUR/kWh",
-            "state_class": "measurement",
+            "raw_all": _map_export(merged_raw_all),
+            **{k: import_attrs[k] for k in import_attrs.keys() if k not in ("raw_all",)},
         }
 
-        state.set(SENSOR_RAW,    state_market, new_attributes=base_attrs)
+        # Push states
+        state.set(SENSOR_RAW,    market_now, new_attributes=base_attrs)
         state.set(SENSOR_IMPORT, state_import, new_attributes=import_attrs)
         state.set(SENSOR_EXPORT, state_export, new_attributes=export_attrs)
 
         log.info(
-            "✅ Updated: base=%s €/kWh, import=%s €/kWh, export=%s €/kWh; today=%d, tomorrow=%d, all=%d",
-            state_market, state_import, state_export,
-            len(raw_today), len(raw_tomorrow_tm), len(raw_all)
+            "✅ Fetched as needed: today %d/%d, tomorrow %d/%d; status t=%s, tm=%s",
+            slots_today, expected_today, slots_tomorrow, expected_tomorrow, status_t, status_tm
         )
 
     finally:
