@@ -1,5 +1,5 @@
 """
-NordPool 15-min (EE) via Pyscript — single raw_all stream with smart polling
+NordPool 15-min (EE) via Pyscript — single raw_all stream with smart polling & date validation
 
 Entities (create these 3 helper sensors in HA first):
 - sensor.nordpool_15_min_raw_pyscript
@@ -9,7 +9,9 @@ Entities (create these 3 helper sensors in HA first):
            status_y, status_t, status_tm (Final / Preliminary / Missing / Corrected / Cancelled / Unknown(...))
            areaStates_y, areaStates_t, areaStates_tm (raw areaStates from API)
            slots_today, slots_tomorrow, slots_all, expected_slots_today, expected_slots_tomorrow
-           tomorrow_complete (bool)
+           today_first_slot, today_last_slot, today_complete
+           tm_first_slot, tm_last_slot, tomorrow_complete, tm_stale
+           today_date_local, tomorrow_date_local_expected
            last_fetch_at_local
 
 - sensor.nordpool_15_min_import_pyscript
@@ -26,17 +28,10 @@ Scheduling:
 - We only chase "tomorrow" between 13:00–00:00 local, or when status_tm is not Final.
   (Prices are typically published in this window; we poll more only to catch the update promptly.)
 
-Manual run:
-- Developer Tools → Services → call service: nordpool_update
-
-Install:
-- Save as apps/pyscript/nordpool_15min.py (or any .py under pyscript/)
-- Create the 3 helper sensors listed above (IDs must match)
-- (Optional) Set HOLIDAY_CALENDAR below to your HA holiday calendar entity_id
-
 Notes:
 - raw_all includes the extra **spill hour** that local time gets across CET↔EE.
 - We avoid unnecessary API calls by checking completeness & status first.
+- From midnight on, we validate by DATE WINDOWS (start/end/contiguity), not just counts.
 """
 
 import json
@@ -81,7 +76,7 @@ except Exception:
 API_BASE = "https://dataportal-api.nordpoolgroup.com/api/DayAheadPriceIndices"
 HEADERS  = {
     "Accept": "application/json",
-    "User-Agent": "HomeAssistant-Pyscript-Nordpool/1.3 (+nordpool_15_min_raw)"
+    "User-Agent": "HomeAssistant-Pyscript-Nordpool/1.4 (+nordpool_15_min_raw)"
 }
 
 # ---------- HTTP / parsing helpers ----------
@@ -215,14 +210,66 @@ def _slice_slots(raw_all, start_local: dt.datetime, end_local: dt.datetime):
             continue
     return out
 
-# ---------- builder ----------
-def _combine_to_raw_all(combined, today0, raw_all_end):
-    def fmt(ts): return ts.strftime("%Y-%m-%dT%H:%M:%S%z")
-    return [
-        {"start": fmt(e["sl"]), "end": fmt(e["el"]), "value": e["p"]}
-        for e in combined
-        if (today0 <= e["sl"] < raw_all_end)
-    ]
+# ---------- validation helpers (ADDED) ----------
+def _validate_slice(raw_slice, start_local: dt.datetime, end_local: dt.datetime):
+    """
+    Validates that:
+      - first slot starts at start_local
+      - last slot ends at end_local
+      - slots are 15-min contiguous (no gaps/overlaps)
+      - count equals expected by exact seconds / 900
+    Returns dict with booleans and diagnostics.
+    """
+    info = {
+        "coverage_ok": False,
+        "bounds_ok": False,
+        "contiguous_ok": False,
+        "count_ok": False,
+        "first": None,
+        "last": None,
+        "count": 0,
+        "expected": _expected_slots(start_local, end_local),
+    }
+    if not raw_slice:
+        return info
+
+    # parse times
+    parsed = []
+    for row in raw_slice:
+        try:
+            sl = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
+            el = dt.datetime.strptime(row["end"],   "%Y-%m-%dT%H:%M:%S%z")
+            parsed.append((sl, el))
+        except Exception:
+            pass
+    if not parsed:
+        return info
+
+    parsed.sort(key=lambda x: x[0])
+    info["first"] = _fmt_local(parsed[0][0])
+    info["last"]  = _fmt_local(parsed[-1][1])
+    info["count"] = len(parsed)
+
+    # bounds
+    bounds_ok = (parsed[0][0] == start_local and parsed[-1][1] == end_local)
+    info["bounds_ok"] = bounds_ok
+
+    # contiguity
+    contiguous_ok = True
+    step = dt.timedelta(minutes=15)
+    for i in range(1, len(parsed)):
+        if parsed[i-1][1] != parsed[i][0]:
+            contiguous_ok = False
+            break
+        if (parsed[i][0] - parsed[i-1][0]) != step:
+            contiguous_ok = False
+            break
+    info["contiguous_ok"] = contiguous_ok
+
+    # count & coverage
+    info["count_ok"] = (len(parsed) == info["expected"])
+    info["coverage_ok"] = (bounds_ok and contiguous_ok and info["count_ok"])
+    return info
 
 def _price_now_from_raw_all(raw_all, now_local):
     for row in raw_all or []:
@@ -234,6 +281,25 @@ def _price_now_from_raw_all(raw_all, now_local):
         except Exception:
             continue
     return None
+
+def _combine_to_raw_all(combined, start_local, end_local):
+    def fmt(ts): return ts.strftime("%Y-%m-%dT%H:%M:%S%z")
+    out = [
+        {"start": fmt(e["sl"]), "end": fmt(e["el"]), "value": e["p"]}
+        for e in combined
+        if (start_local <= e["sl"] < end_local)
+    ]
+    out.sort(key=lambda r: r["start"])
+    # ensure contiguity by removing dupes/overlaps if any (defensive)
+    clean = []
+    last_end = None
+    for r in out:
+        if last_end and r["start"] != last_end:
+            # gap/overlap → break; leave validator to decide fetch
+            pass
+        clean.append(r)
+        last_end = r["end"]
+    return clean
 
 # ---------- main ----------
 @time_trigger("startup")
@@ -254,6 +320,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         cached_raw_all = prev_attrs.get("raw_all") or []
         prev_status_t  = prev_attrs.get("status_t")
         prev_status_tm = prev_attrs.get("status_tm")
+        prev_today_date = prev_attrs.get("today_date_local")
 
         # Local day bounds
         now_utc   = dt.datetime.now(dt.timezone.utc)
@@ -267,28 +334,42 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         spill_hours = max(0, spill_hours)
         raw_all_end = day_after0 + dt.timedelta(hours=spill_hours)
 
-        # Slot counts from cache
-        slots_today_cached    = _count_slots_in_range(cached_raw_all, today0,   tomorrow0)
-        slots_tomorrow_cached = _count_slots_in_range(cached_raw_all, tomorrow0, day_after0)
+        # Purge anything < today0 so yesterday can't linger
+        if cached_raw_all:
+            cached_raw_all = _slice_slots(cached_raw_all, today0, raw_all_end)
+
+        # Cached slices & validation (ADDED)
+        today_slice_cached    = _slice_slots(cached_raw_all, today0,   tomorrow0)
+        tm_slice_cached       = _slice_slots(cached_raw_all, tomorrow0, day_after0)
         expected_today        = _expected_slots(today0, tomorrow0)
         expected_tomorrow     = _expected_slots(tomorrow0, day_after0)
-        tomorrow_window = (now_local.hour >= 13)  # only chase tm after 13:00 local
+
+        v_today = _validate_slice(today_slice_cached, today0, tomorrow0)
+        v_tm    = _validate_slice(tm_slice_cached,    tomorrow0, day_after0)
+
+        # Midnight rollover detection (ADDED)
+        is_new_day = (prev_today_date != str(today0.date()))
+
+        # Only chase tm after 13:00 local
+        tomorrow_window = (now_local.hour >= 13)
 
         need_y_t = False
         need_tm  = False
 
-        # Decide whether we need today/yesterday
-        if slots_today_cached < expected_today:
+        # Decide whether we need today/yesterday (ADDED: date validation)
+        if is_new_day:
+            need_y_t = True
+        elif not v_today["coverage_ok"]:
             need_y_t = True
         elif (prev_status_t and prev_status_t != "Final"):
             need_y_t = True
         else:
-            # Full day present → implicitly treat as Final
             prev_status_t = prev_status_t or "Final"
 
-        # Decide whether we need tomorrow
+        # Decide whether we need tomorrow (ADDED: date validation)
+        tm_stale = not v_tm["coverage_ok"]
         if tomorrow_window:
-            if slots_tomorrow_cached < expected_tomorrow:
+            if tm_stale:
                 need_tm = True
             elif (prev_status_tm and prev_status_tm != "Final"):
                 need_tm = True
@@ -299,18 +380,27 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         # If nothing needed, we can compute current state from cache and exit early
         if not need_y_t and not need_tm and cached_raw_all:
             market_now = _price_now_from_raw_all(cached_raw_all, now_local)
-            # preserve updatedAt_tm from cache
+
             base_attrs = {
                 **prev_attrs,
                 "raw_all": cached_raw_all,
-                "slots_today": slots_today_cached,
-                "slots_tomorrow": slots_tomorrow_cached,
+                "slots_today": v_today["count"],
+                "slots_tomorrow": v_tm["count"],
                 "slots_all": len(cached_raw_all),
                 "expected_slots_today": expected_today,
                 "expected_slots_tomorrow": expected_tomorrow,
-                "tomorrow_complete": (slots_tomorrow_cached >= expected_tomorrow),
+                "today_first_slot": v_today["first"],
+                "today_last_slot":  v_today["last"],
+                "today_complete":   v_today["coverage_ok"],
+                "tm_first_slot":    v_tm["first"],
+                "tm_last_slot":     v_tm["last"],
+                "tomorrow_complete": v_tm["coverage_ok"],
+                "tm_stale": tm_stale,
+                "today_date_local": str(today0.date()),
+                "tomorrow_date_local_expected": str(tomorrow0.date()),
                 "last_fetch_at_local": prev_attrs.get("last_fetch_at_local"),
             }
+
             # states
             state_import = _apply_import(market_now, now_local) if market_now is not None else None
             state_export = _apply_export(market_now)             if market_now is not None else None
@@ -320,7 +410,9 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
                 **{k: base_attrs.get(k) for k in (
                     "updatedAt_tm_utc","updatedAt_tm_local","status_y","status_t","status_tm",
                     "slots_today","slots_tomorrow","slots_all","expected_slots_today","expected_slots_tomorrow",
-                    "tomorrow_complete","last_fetch_at_local",
+                    "today_first_slot","today_last_slot","today_complete",
+                    "tm_first_slot","tm_last_slot","tomorrow_complete","tm_stale",
+                    "today_date_local","tomorrow_date_local_expected","last_fetch_at_local",
                 )},
                 "unit_of_measurement": "EUR/kWh",
                 "state_class": "measurement",
@@ -333,8 +425,11 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             state.set(SENSOR_RAW,    market_now, new_attributes=base_attrs)
             state.set(SENSOR_IMPORT, state_import, new_attributes=import_attrs)
             state.set(SENSOR_EXPORT, state_export, new_attributes=export_attrs)
-            log.info("✅ No fetch needed; kept cache. Today=%d/%d, Tomorrow=%d/%d",
-                     slots_today_cached, expected_today, slots_tomorrow_cached, expected_tomorrow)
+            log.info(
+                "✅ No fetch needed; kept cache. Today=%d/%d (ok=%s), Tomorrow=%d/%d (ok=%s)",
+                v_today["count"], expected_today, v_today["coverage_ok"],
+                v_tm["count"], expected_tomorrow, v_tm["coverage_ok"]
+            )
             return
 
         # We do need to fetch something
@@ -373,40 +468,42 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         # If we fetched nothing (e.g., only tm outside window), keep cache
         merged_raw_all = cached_raw_all[:]
 
-        # If today/yesterday fetched → rebuild today's slice from API, keep any existing tomorrow slice from cache
+        # If today/yesterday fetched → rebuild today's slice from API, keep any existing (validated) tomorrow slice from cache
         if need_y_t and combined:
             rebuilt_today = _combine_to_raw_all(combined, today0, tomorrow0)
-            # keep tomorrow part from cache
-            tomorrow_cached_slice = _slice_slots(cached_raw_all, tomorrow0, day_after0)
-            # include spill calculation window end
+            # keep only valid tomorrow slice from cache; else drop and wait for tm fetch window
+            tomorrow_cached_slice = tm_slice_cached if v_tm["coverage_ok"] else []
             spill_tail = _slice_slots(cached_raw_all, day_after0, raw_all_end)
             merged_raw_all = rebuilt_today + tomorrow_cached_slice + spill_tail
 
         # If we fetched tm → rebuild tomorrow slice from API and merge into merged_raw_all
         if need_tm and combined:
             rebuilt_tm = _combine_to_raw_all(combined, tomorrow0, raw_all_end)
-            # remove old tomorrow+spill from merged_raw_all, then append fresh
             kept_today = _slice_slots(merged_raw_all, today0, tomorrow0)
             merged_raw_all = kept_today + rebuilt_tm
 
-        # If neither branch added anything (e.g. API error) → keep cache
         if not merged_raw_all:
             merged_raw_all = cached_raw_all[:]
 
-        # Sort just in case (by start)
+        # Sort
         try:
             merged_raw_all.sort(key=lambda r: r["start"])
         except Exception:
             pass
 
-        # Recompute counts
-        slots_today    = _count_slots_in_range(merged_raw_all, today0,   tomorrow0)
-        slots_tomorrow = _count_slots_in_range(merged_raw_all, tomorrow0, day_after0)
+        # Recompute counts + validity from merged
+        today_slice  = _slice_slots(merged_raw_all, today0,   tomorrow0)
+        tm_slice     = _slice_slots(merged_raw_all, tomorrow0, day_after0)
+        v_today2     = _validate_slice(today_slice, today0, tomorrow0)
+        v_tm2        = _validate_slice(tm_slice,    tomorrow0, day_after0)
+        slots_today    = v_today2["count"]
+        slots_tomorrow = v_tm2["count"]
+        tm_stale2      = not v_tm2["coverage_ok"]
 
-        # Determine statuses
+        # Determine statuses (keep previous if not fetched)
         status_y, areaStates_y   = _status_for_area(data_y,  area) if need_y_t else (prev_attrs.get("status_y") or "Unknown", prev_attrs.get("areaStates_y") or [])
-        status_t, areaStates_t   = _status_for_area(data_t,  area) if need_y_t else (prev_attrs.get("status_t") or ("Final" if slots_today>=expected_today else "Unknown"), prev_attrs.get("areaStates_t") or [])
-        status_tm, areaStates_tm = _status_for_area(data_tm, area) if need_tm  else (prev_attrs.get("status_tm") or ("Final" if slots_tomorrow>=expected_tomorrow else "Missing"), prev_attrs.get("areaStates_tm") or [])
+        status_t, areaStates_t   = _status_for_area(data_t,  area) if need_y_t else (prev_attrs.get("status_t") or ("Final" if v_today2["coverage_ok"] else "Unknown"), prev_attrs.get("areaStates_t") or [])
+        status_tm, areaStates_tm = _status_for_area(data_tm, area) if need_tm  else (prev_attrs.get("status_tm") or ("Final" if v_tm2["coverage_ok"] else "Missing"), prev_attrs.get("areaStates_tm") or [])
 
         # updatedAt for tomorrow only
         upd_tm_utc_prev   = prev_attrs.get("updatedAt_tm_utc")
@@ -417,11 +514,9 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             if raw_upd:
                 upd_tm_utc, upd_tm_local = _parse_updated_pair(raw_upd)
 
-        # Current price (try merged_raw_all first)
+        # Current price
         market_now = _price_now_from_raw_all(merged_raw_all, now_local)
         if market_now is None and combined:
-            # fallback: compute from fresh combined windows if we can
-            market_now = None
             for e in combined:
                 if e["su"] <= now_utc < e["eu"]:
                     market_now = e["p"]
@@ -443,7 +538,15 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             "slots_all": len(merged_raw_all),
             "expected_slots_today": expected_today,
             "expected_slots_tomorrow": expected_tomorrow,
-            "tomorrow_complete": (slots_tomorrow >= expected_tomorrow),
+            "today_first_slot": v_today2["first"],
+            "today_last_slot":  v_today2["last"],
+            "today_complete":   v_today2["coverage_ok"],
+            "tm_first_slot":    v_tm2["first"],
+            "tm_last_slot":     v_tm2["last"],
+            "tomorrow_complete": v_tm2["coverage_ok"],
+            "tm_stale": tm_stale2,
+            "today_date_local": str(today0.date()),
+            "tomorrow_date_local_expected": str(tomorrow0.date()),
             "last_fetch_at_local": _fmt_local(now_local),
             "unit_of_measurement": "EUR/kWh",
             "state_class": "measurement",
@@ -458,7 +561,9 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             **{k: base_attrs[k] for k in (
                 "updatedAt_tm_utc","updatedAt_tm_local","status_y","status_t","status_tm",
                 "slots_today","slots_tomorrow","slots_all","expected_slots_today","expected_slots_tomorrow",
-                "tomorrow_complete","last_fetch_at_local",
+                "today_first_slot","today_last_slot","today_complete",
+                "tm_first_slot","tm_last_slot","tomorrow_complete","tm_stale",
+                "today_date_local","tomorrow_date_local_expected","last_fetch_at_local",
             )},
             "unit_of_measurement": "EUR/kWh",
             "state_class": "measurement",
@@ -474,8 +579,10 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         state.set(SENSOR_EXPORT, state_export, new_attributes=export_attrs)
 
         log.info(
-            "✅ Fetched as needed: today %d/%d, tomorrow %d/%d; status t=%s, tm=%s",
-            slots_today, expected_today, slots_tomorrow, expected_tomorrow, status_t, status_tm
+            "✅ Fetched as needed: today %d/%d (ok=%s), tomorrow %d/%d (ok=%s); status t=%s, tm=%s",
+            slots_today, expected_today, v_today2["coverage_ok"],
+            slots_tomorrow, expected_tomorrow, v_tm2["coverage_ok"],
+            status_t, status_tm
         )
 
     finally:
