@@ -1,0 +1,102 @@
+#prerequisite - https://github.com/iantrich/config-template-card
+
+type: custom:config-template-card
+variables:
+  span: |
+    rawAll => {
+      const n = Array.isArray(rawAll) ? rawAll.length : 0;
+      return `${Math.round(n / 4)}h`;
+    }
+  raw_all_export: |
+    (() => {
+      const e = states['sensor.nordpool_15_min_export_pyscript'];
+      return (e && e.attributes && Array.isArray(e.attributes.raw_all))
+        ? e.attributes.raw_all
+        : [];
+    })()
+  min_from_raw_all: |
+    rawAll => {
+      const arr = Array.isArray(rawAll) ? rawAll : [];
+      const nums = arr
+        .map(s => Number(s?.value))
+        .filter(v => Number.isFinite(v));
+      if (nums.length === 0) return 0;
+      const m = Math.min(...nums);
+      return (m < 0 ? -0.1 : 0);
+    }
+entities:
+  - sensor.nordpool_15_min_export_pyscript
+  - sensor.nordpool_15_min_import_pyscript
+card:
+  type: custom:apexcharts-card
+  graph_span: ${span(states['sensor.nordpool_15_min_export_pyscript'].attributes.raw_all)}
+  yaxis:
+    - id: y1
+      min: ${min_from_raw_all(raw_all_export)}
+  apex_config:
+    xaxis:
+      type: datetime
+    tooltip:
+      x:
+        format: yyyy-MM-dd HH:mm
+    chart:
+      height: 340px
+  show:
+    last_updated: true
+  experimental:
+    color_threshold: true
+  header:
+    title: Electricity Price
+    show: true
+    show_states: true
+    colorize_states: true
+  span:
+    start: day
+  now:
+    show: true
+    label: Now
+  series:
+    - entity: sensor.nordpool_15_min_export_pyscript
+      float_precision: 3
+      name: Export
+      show:
+        extremas: true
+        in_header: raw
+        legend_value: false
+        header_color_threshold: true
+      type: column
+      data_generator: |
+        return [...(entity.attributes.raw_all || [])]
+          .filter(s => Number.isFinite(Number(s?.value)))
+          .sort((a,b) => new Date(a.start) - new Date(b.start))
+          .map(s => [new Date(s.start).getTime(), Number(s.value)]);
+      color_threshold:
+        - value: -1
+          color: "#007bff"
+          opacity: 1
+        - value: 0
+          color: "#28a745"
+          opacity: 1
+        - value: 0.05
+          color: "#ffed4a"
+          opacity: 1
+        - value: 0.1
+          color: "#fd7e14"
+        - value: 0.2
+          color: "#dc3545"
+    - entity: sensor.nordpool_15_min_import_pyscript
+      float_precision: 3
+      name: Import
+      show:
+        extremas: true
+        in_header: raw
+        legend_value: false
+        header_color_threshold: true
+      type: line
+      stroke_width: 2
+      data_generator: |
+        return [...(entity.attributes.raw_all || [])]
+          .filter(s => Number.isFinite(Number(s?.value)))
+          .sort((a,b) => new Date(a.start) - new Date(b.start))
+          .map(s => [new Date(s.start).getTime(), Number(s.value)]);
+      color: green
