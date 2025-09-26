@@ -53,7 +53,7 @@ except Exception:
 API_BASE = "https://dataportal-api.nordpoolgroup.com/api/DayAheadPriceIndices"
 HEADERS  = {
     "Accept": "application/json",
-    "User-Agent": "HomeAssistant-Pyscript-Nordpool/1.4 (+raw_only)"
+    "User-Agent": "HomeAssistant-Pyscript-Nordpool/1.5 (+raw_only)"
 }
 
 # ---------- HTTP / parsing helpers ----------
@@ -169,11 +169,14 @@ def _is_contiguous_15m(raw_all, start_local, end_local):
 # ---------- builders ----------
 def _combine_to_raw_all(combined, start_local, end_local):
     def fmt(ts): return ts.strftime("%Y-%m-%dT%H:%M:%S%z")
-    return [
+    out = [
         {"start": fmt(e["sl"]), "end": fmt(e["el"]), "value": e["p"]}
         for e in combined
         if (start_local <= e["sl"] < end_local)
     ]
+    # keep order consistent
+    out.sort(key=lambda r: r["start"])
+    return out
 
 def _price_now_from_raw_all(raw_all, now_local):
     for row in raw_all or []:
@@ -290,13 +293,16 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         d_t  = (now_cet.date()).strftime("%Y-%m-%d")
         d_tm = (now_cet.date() + dt.timedelta(days=1)).strftime("%Y-%m-%d")
 
-        # Fetch as needed
+        # Fetch as needed (include d_t when fetching tm if there is a local spill hour)
         try:
             async with aiohttp.ClientSession() as session:
                 if need_y_t:
                     data_y = await _fetch_date(session, d_y,  area, currency, resolution)
                     data_t = await _fetch_date(session, d_t,  area, currency, resolution)
                 if need_tm:
+                    if spill_hours > 0 and data_t is None:
+                        # Needed to capture local 00:00–01:00 spill into "tomorrow"
+                        data_t = await _fetch_date(session, d_t, area, currency, resolution)
                     data_tm = await _fetch_date(session, d_tm, area, currency, resolution)
         except Exception as e:
             log.error(f"❌ Session error: {e} — keeping last values")
