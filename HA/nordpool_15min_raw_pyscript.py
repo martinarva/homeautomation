@@ -401,8 +401,6 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             "today_date_local": today0.strftime("%Y-%m-%d"),
             "tomorrow_date_local_expected": tomorrow0.strftime("%Y-%m-%d"),
             "last_fetch_at_local": _fmt_local(now_local),
-            "unit_of_measurement": "EUR/kWh",
-            "state_class": "measurement",
         }
 
         state.set(SENSOR_RAW, market_now, new_attributes=base_attrs)
