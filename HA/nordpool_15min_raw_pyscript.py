@@ -188,7 +188,7 @@ def _price_now_from_raw_all(raw_all, now_local):
 
 # ---------- main ----------
 @time_trigger("startup")
-@time_trigger("period(minute=15)")   # every 15 minutes; internal logic decides whether to fetch
+@time_trigger("cron(0,15,30,45 * * * *)")    # every 15 minutes; internal logic decides whether to fetch
 @service
 async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
     # overlap guard
