@@ -210,7 +210,7 @@ def _slice_slots(raw_all, start_local: dt.datetime, end_local: dt.datetime):
             continue
     return out
 
-# ---------- validation helpers (ADDED) ----------
+# ---------- validation helpers ----------
 def _validate_slice(raw_slice, start_local: dt.datetime, end_local: dt.datetime):
     """
     Validates that:
@@ -233,7 +233,6 @@ def _validate_slice(raw_slice, start_local: dt.datetime, end_local: dt.datetime)
     if not raw_slice:
         return info
 
-    # parse times
     parsed = []
     for row in raw_slice:
         try:
@@ -290,20 +289,12 @@ def _combine_to_raw_all(combined, start_local, end_local):
         if (start_local <= e["sl"] < end_local)
     ]
     out.sort(key=lambda r: r["start"])
-    # ensure contiguity by removing dupes/overlaps if any (defensive)
-    clean = []
-    last_end = None
-    for r in out:
-        if last_end and r["start"] != last_end:
-            # gap/overlap → break; leave validator to decide fetch
-            pass
-        clean.append(r)
-        last_end = r["end"]
-    return clean
+    # defensive clean (no-op other than ordering)
+    return out
 
 # ---------- main ----------
 @time_trigger("startup")
-@time_trigger("cron(0,15,30,45 * * * *)")    # every 15 minutes; internal logic decides whether to fetch
+@time_trigger("cron(0,15,30,45 * * * *)")  # every 15 minutes; internal logic decides whether to fetch
 @service
 async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
     # overlap guard
@@ -338,7 +329,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         if cached_raw_all:
             cached_raw_all = _slice_slots(cached_raw_all, today0, raw_all_end)
 
-        # Cached slices & validation (ADDED)
+        # Cached slices & validation
         today_slice_cached    = _slice_slots(cached_raw_all, today0,   tomorrow0)
         tm_slice_cached       = _slice_slots(cached_raw_all, tomorrow0, day_after0)
         expected_today        = _expected_slots(today0, tomorrow0)
@@ -347,7 +338,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         v_today = _validate_slice(today_slice_cached, today0, tomorrow0)
         v_tm    = _validate_slice(tm_slice_cached,    tomorrow0, day_after0)
 
-        # Midnight rollover detection (ADDED)
+        # Midnight rollover detection
         is_new_day = (prev_today_date != str(today0.date()))
 
         # Only chase tm after 13:00 local
@@ -356,7 +347,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         need_y_t = False
         need_tm  = False
 
-        # Decide whether we need today/yesterday (ADDED: date validation)
+        # Decide whether we need today/yesterday
         if is_new_day:
             need_y_t = True
         elif not v_today["coverage_ok"]:
@@ -366,7 +357,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         else:
             prev_status_t = prev_status_t or "Final"
 
-        # Decide whether we need tomorrow (ADDED: date validation)
+        # Decide whether we need tomorrow
         tm_stale = not v_tm["coverage_ok"]
         if tomorrow_window:
             if tm_stale:
@@ -377,7 +368,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         combined = []
         data_y = data_t = data_tm = None
 
-        # If nothing needed, we can compute current state from cache and exit early
+        # ---- Early exit if nothing needed
         if not need_y_t and not need_tm and cached_raw_all:
             market_now = _price_now_from_raw_all(cached_raw_all, now_local)
 
@@ -401,7 +392,6 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
                 "last_fetch_at_local": prev_attrs.get("last_fetch_at_local"),
             }
 
-            # states
             state_import = _apply_import(market_now, now_local) if market_now is not None else None
             state_export = _apply_export(market_now)             if market_now is not None else None
 
@@ -432,8 +422,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             )
             return
 
-        # We do need to fetch something
-        # Figure CET delivery dates (y, t, tm)
+        # ---- We do need to fetch something
         now_cet = now_utc.astimezone(CET_TZ)
         d_y  = (now_cet.date() - dt.timedelta(days=1)).strftime("%Y-%m-%d")
         d_t  = (now_cet.date()).strftime("%Y-%m-%d")
@@ -444,7 +433,12 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
                 if need_y_t:
                     data_y = await _fetch_date(session, d_y,  area, currency, resolution)
                     data_t = await _fetch_date(session, d_t,  area, currency, resolution)
+
                 if need_tm:
+                    # IMPORTANT: also fetch d_t to capture the *local* tomorrow spill hour (00:00–01:00),
+                    # which belongs to CET "today".
+                    if spill_hours > 0 and data_t is None:
+                        data_t = await _fetch_date(session, d_t, area, currency, resolution)
                     data_tm = await _fetch_date(session, d_tm, area, currency, resolution)
         except Exception as e:
             log.error(f"❌ Session error: {e} — keeping last values")
@@ -468,15 +462,14 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         # If we fetched nothing (e.g., only tm outside window), keep cache
         merged_raw_all = cached_raw_all[:]
 
-        # If today/yesterday fetched → rebuild today's slice from API, keep any existing (validated) tomorrow slice from cache
+        # If today/yesterday fetched → rebuild today's slice; keep valid tomorrow slice from cache
         if need_y_t and combined:
             rebuilt_today = _combine_to_raw_all(combined, today0, tomorrow0)
-            # keep only valid tomorrow slice from cache; else drop and wait for tm fetch window
             tomorrow_cached_slice = tm_slice_cached if v_tm["coverage_ok"] else []
             spill_tail = _slice_slots(cached_raw_all, day_after0, raw_all_end)
             merged_raw_all = rebuilt_today + tomorrow_cached_slice + spill_tail
 
-        # If we fetched tm → rebuild tomorrow slice from API and merge into merged_raw_all
+        # If we fetched tm → rebuild tomorrow slice (from t + tm to include spill)
         if need_tm and combined:
             rebuilt_tm = _combine_to_raw_all(combined, tomorrow0, raw_all_end)
             kept_today = _slice_slots(merged_raw_all, today0, tomorrow0)
