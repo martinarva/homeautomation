@@ -1,5 +1,3 @@
-#prerequisite - https://github.com/iantrich/config-template-card
-
 type: custom:config-template-card
 variables:
   span: |
