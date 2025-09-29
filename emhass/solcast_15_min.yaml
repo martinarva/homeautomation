@@ -1,0 +1,54 @@
+template:
+  - sensor:
+    - name: "solcast_pv_forecast_forecast_today_15min"
+      state: "{{ states('sensor.solcast_pv_forecast_forecast_today') }}"
+      attributes:
+        state_class: total
+        dayname: "{{ state_attr('sensor.solcast_pv_forecast_forecast_today', 'dayname') }}"
+        dataCorrect: "{{ state_attr('sensor.solcast_pv_forecast_forecast_today', 'dataCorrect') }}"
+        detailedForecast: >
+          {% set data = state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedForecast') %}
+          {% set expanded = namespace(entries=[]) %}
+          {% for item in data %}
+            {% set start_time = item.period_start %}
+            {% set value = item.pv_estimate %}
+            {% set start_dt = as_datetime(start_time) %}
+
+            {# Split the 30-minute period into two 15-minute intervals #}
+            {% for i in range(0, 2) %}
+              {% set new_start = (start_dt + timedelta(minutes=i * 15)) %}
+              {% set new_value = value %}  {# Use the same value for both 15-minute intervals #}
+              {% set expanded.entries = expanded.entries + [{
+                'period_start': new_start | as_timestamp,
+                'pv_estimate': new_value
+              }] %}
+            {% endfor %}
+          {% endfor %}
+          {{ expanded.entries }}
+
+  - sensor:
+    - name: "solcast_pv_forecast_forecast_tomorrow_15min"
+      state: "{{ states('sensor.solcast_pv_forecast_forecast_tomorrow') }}"
+      attributes:
+        state_class: total
+        dayname: "{{ state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'dayname') }}"
+        dataCorrect: "{{ state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'dataCorrect') }}"
+        detailedForecast: >
+          {% set data = state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedForecast') %}
+          {% set expanded = namespace(entries=[]) %}
+          {% for item in data %}
+            {% set start_time = item.period_start %}
+            {% set value = item.pv_estimate %}
+            {% set start_dt = as_datetime(start_time) %}
+
+            {# Split the 30-minute period into two 15-minute intervals #}
+            {% for i in range(0, 2) %}
+              {% set new_start = (start_dt + timedelta(minutes=i * 15)) %}
+              {% set new_value = value %}  {# Use the same value for both 15-minute intervals #}
+              {% set expanded.entries = expanded.entries + [{
+                'period_start': new_start | as_timestamp,
+                'pv_estimate': new_value
+              }] %}
+            {% endfor %}
+          {% endfor %}
+          {{ expanded.entries }}
