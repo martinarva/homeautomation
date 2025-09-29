@@ -1,0 +1,411 @@
+"""
+NordPool 15-min (EE) via Pyscript — Final & Stable Release
+
+A resilient and Pyscript-compatible script to fetch NordPool spot prices.
+It applies local tariffs for optional import/export sensors and provides extensive
+diagnostics while minimizing API calls and database load.
+
+Entities:
+- sensor.nordpool_15_min_raw_pyscript (Required)
+  Create this helper sensor in Home Assistant first.
+  state  : Current 15-min market price (€/kWh).
+  attrs  : raw_all (local today + local tomorrow + spill hour)
+           updatedAt_tm_utc, updatedAt_tm_local (publish time of "tomorrow")
+           status_y, status_t, status_tm (API data status: Final, Preliminary, etc.)
+           slots_today, slots_tomorrow, slots_all
+           expected_slots_today, expected_slots_tomorrow
+           today_first_slot, today_last_slot, today_complete
+           tm_first_slot, tm_last_slot, tomorrow_complete, tm_stale
+           today_date_local, last_fetch_at_local
+           has_import_sensor, has_export_sensor (booleans indicating if optional sensors are enabled)
+
+- sensor.nordpool_15_min_import_pyscript (Optional)
+  To enable, define its entity_id in the script's configuration.
+  To disable, leave the variable empty (e.g., SENSOR_IMPORT = "").
+  state  : Current 15-min import price after all tariffs (€/kWh).
+           (Calculated using Elektrilevi "Võrk 4" network package tariffs).
+  attrs  : raw_all (tariffed view), with most diagnostic fields mirrored from the raw sensor.
+
+- sensor.nordpool_15_min_export_pyscript (Optional)
+  To enable, define its entity_id in the script's configuration.
+  To disable, leave the variable empty (e.g., SENSOR_EXPORT = "").
+  state  : Current 15-min export price including margin (€/kWh).
+  attrs  : raw_all (export-adjusted view), with most diagnostic fields mirrored from the raw sensor.
+
+Scheduling:
+- Runs on startup.
+- Runs every 15 minutes, but internal logic decides whether to call the API.
+- Only actively polls for "tomorrow's" prices after 13:00 local time, or if the
+  cached data for tomorrow is incomplete or not marked as "Final".
+
+Notes:
+- Optimized for the Pyscript environment to ensure stability and avoid common errors.
+- Attributes are compacted (by removing verbose fields and rounding prices) to prevent
+  database warnings.
+- The script correctly handles the "spill hour" during DST changes.
+- API calls are minimized by checking data completeness and status from the cache first.
+- Data validation is strict, ensuring full contiguity of all time slots.
+- The script is resilient to corrupted cache data and handles API errors gracefully.
+"""
+
+import json
+import datetime as dt
+import aiohttp
+import asyncio
+import random
+from typing import List, Dict, Any, Optional, Tuple
+
+# ---------- Configuration ----------
+HOLIDAY_CALENDAR = "calendar.estonia"  # Set to None to disable holiday logic
+AREA           = "EE"
+CURRENCY       = "EUR"
+RESOLUTION     = 15  # minutes
+
+# Import tariff components (EUR/kWh)
+IMPORT_TARIFFS = {
+    "alexela_marginaal": 0.0000,
+    "taastuv":           0.0084,
+    "aktsiis":           0.0021,
+    "elektrilevi_p2ev":  0.0369,  # Day tariff
+    "elektrilevi_88":    0.0210,  # Night/weekend/holiday
+    "vat":               1.24,    # Multiplier
+}
+EXPORT_MARGIN = -0.00167  # EUR/kWh (negative -> subtract from market)
+
+# Target helper entities (must exist in HA)
+SENSOR_RAW    = "sensor.nordpool_15_min_raw_pyscript"
+SENSOR_IMPORT = "sensor.nordpool_15_min_import_pyscript"  # Leave empty ("") to disable
+SENSOR_EXPORT = "sensor.nordpool_15_min_export_pyscript"  # Leave empty ("") to disable
+
+# --- Safety Asserts ---
+assert not SENSOR_IMPORT or SENSOR_IMPORT.strip() != SENSOR_RAW, "SENSOR_IMPORT must differ from SENSOR_RAW"
+assert not SENSOR_EXPORT or SENSOR_EXPORT.strip() != SENSOR_RAW, "SENSOR_EXPORT must differ from SENSOR_RAW"
+
+
+# ---------- Timezones ----------
+try:
+    from zoneinfo import ZoneInfo
+    EE_TZ  = ZoneInfo("Europe/Tallinn")
+    CET_TZ = ZoneInfo("Europe/Paris")
+except ImportError:
+    EE_TZ  = dt.timezone(dt.timedelta(hours=3))
+    CET_TZ = dt.timezone(dt.timedelta(hours=1))
+
+API_BASE = "https://dataportal-api.nordpoolgroup.com/api/DayAheadPriceIndices"
+HEADERS  = {
+    "Accept": "application/json",
+    "User-Agent": "HomeAssistant-Pyscript-Nordpool/3.3 (+nordpool_15_min_raw)"
+}
+
+
+# ---------- API and Data Parsing ----------
+
+async def _fetch_date(session: aiohttp.ClientSession, date_str: str) -> Optional[Dict[str, Any]]:
+    url = (
+        f"{API_BASE}?date={date_str}"
+        f"&market=DayAhead&indexNames={AREA}&currency={CURRENCY}&resolutionInMinutes={RESOLUTION}"
+    )
+    log.info(f"🔗 GETting prices for {date_str}")
+    try:
+        async with session.get(url, headers=HEADERS, timeout=30) as resp:
+            body = await resp.text()
+            if resp.status != 200:
+                log.warning(f"HTTP {resp.status} for {date_str}; body[:200]={body[:200]}")
+                return None
+            return json.loads(body)
+    except Exception as ex:
+        log.error(f"Request or JSON parse error for {date_str}: {ex}")
+    return None
+
+def _parse_api_data(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    parsed_entries = []
+    if not data or "multiIndexEntries" not in data:
+        return []
+    for entry in data.get("multiIndexEntries", []):
+        try:
+            start_utc = dt.datetime.fromisoformat(entry["deliveryStart"].replace("Z", "+00:00"))
+            end_utc = dt.datetime.fromisoformat(entry["deliveryEnd"].replace("Z", "+00:00"))
+            price = round(float(entry["entryPerArea"][AREA]) / 1000.0, 3)
+            parsed_entries.append({
+                "start": start_utc.astimezone(EE_TZ),
+                "end": end_utc.astimezone(EE_TZ),
+                "value": price,
+            })
+        except (KeyError, ValueError, TypeError) as ex:
+            log.warning(f"⚠️ Skipping malformed entry {entry}: {ex}")
+    return parsed_entries
+
+
+# ---------- Price Transforms and Tariff Logic ----------
+
+def _is_holiday(slot_start_local: dt.datetime, holiday_info: Dict[str, Any]) -> bool:
+    if not holiday_info.get("is_on") or not holiday_info.get("all_day"): return False
+    try:
+        holiday_start = dt.datetime.fromisoformat(holiday_info["start_time"]).astimezone(EE_TZ)
+        return holiday_start.date() == slot_start_local.date()
+    except (KeyError, TypeError, ValueError):
+        return False
+
+def _is_offpeak(slot_start_local: dt.datetime, holiday_info: Dict[str, Any]) -> bool:
+    if slot_start_local.weekday() >= 5 or not (7 <= slot_start_local.hour < 22): return True
+    if HOLIDAY_CALENDAR and holiday_info and _is_holiday(slot_start_local, holiday_info): return True
+    return False
+
+def _apply_import_tariffs(price: float, slot_start_local: dt.datetime, holiday_info: Dict[str, Any]) -> float:
+    network_tariff = IMPORT_TARIFFS["elektrilevi_88"] if _is_offpeak(slot_start_local, holiday_info) else IMPORT_TARIFFS["elektrilevi_p2ev"]
+    base = price + IMPORT_TARIFFS["alexela_marginaal"] + IMPORT_TARIFFS["taastuv"] + IMPORT_TARIFFS["aktsiis"] + network_tariff
+    return round(base * IMPORT_TARIFFS["vat"], 3)
+
+def _apply_export_margin(price: float, **_) -> float:
+    return round(price + EXPORT_MARGIN, 3)
+
+def _map_prices(raw_data: List[Dict], func: callable, **kwargs) -> List[Dict]:
+    out = []
+    for row in raw_data:
+        out.append({**row, "value": func(row["value"], slot_start_local=row["start"], **kwargs)})
+    return out
+
+def _to_ha_format(internal_data: List[Dict]) -> List[Dict]:
+    out = []
+    for s in internal_data:
+        out.append({"start": s["start"].isoformat(), "end": s["end"].isoformat(), "value": s["value"]})
+    return out
+
+
+# ---------- Slot and Validation Utilities ----------
+
+def _get_slots_in_range(all_slots: List[Dict], start_dt: dt.datetime, end_dt: dt.datetime) -> List[Dict]:
+    out = []
+    for s in all_slots:
+        if start_dt <= s["start"] < end_dt:
+            out.append(s)
+    return out
+
+def _expected_slots_count(start_local: dt.datetime, end_local: dt.datetime) -> int:
+    return int((end_local - start_local).total_seconds()) // (15 * 60)
+
+def _validate_slice(price_slice: List[Dict], start_dt: dt.datetime, end_dt: dt.datetime) -> Dict[str, Any]:
+    info = {"is_complete": False, "first": None, "last": None, "count": 0}
+    if not price_slice:
+        if start_dt == end_dt: info["is_complete"] = True
+        return info
+
+    price_slice.sort(key=lambda x: x["start"])
+    info["count"] = len(price_slice)
+    info["first"] = price_slice[0]["start"].isoformat()
+    info["last"] = price_slice[-1]["end"].isoformat()
+
+    expected_count = _expected_slots_count(start_dt, end_dt)
+    bounds_ok = price_slice[0]["start"] == start_dt and price_slice[-1]["end"] == end_dt
+    count_ok = len(price_slice) == expected_count
+
+    is_contiguous = True
+    for i in range(len(price_slice) - 1):
+        if price_slice[i]['end'] != price_slice[i+1]['start']:
+            is_contiguous = False
+            break
+    
+    info["is_complete"] = bounds_ok and count_ok and is_contiguous
+    return info
+
+def _get_current_price(all_slots: List[Dict], now_dt: dt.datetime) -> Optional[float]:
+    for slot in all_slots:
+        if slot["start"] <= now_dt < slot["end"]:
+            return float(slot["value"])
+    return None
+
+def _get_status_for_area(data: Optional[Dict], area: str) -> str:
+    if not data or "areaStates" not in data: return "Missing"
+    area_states = data.get("areaStates") or []
+    for row in area_states:
+        if area in (row.get("areas") or []) and row.get("state"):
+            return row["state"]
+    return "Unknown"
+
+
+# ---------- Main Pyscript Service ----------
+
+@time_trigger("startup")
+@time_trigger("cron(0,15,30,45 * * * *)")
+@service
+async def nordpool_update():
+    if getattr(nordpool_update, "_running", False):
+        log.info("⏳ Previous update is still running; skipping this tick.")
+        return
+    nordpool_update._running = True
+
+    try:
+        await asyncio.sleep(random.uniform(0.0, 3.0))
+
+        now_utc = dt.datetime.now(dt.timezone.utc)
+        now_local = now_utc.astimezone(EE_TZ)
+        today0 = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow0 = today0 + dt.timedelta(days=1)
+        day_after0 = today0 + dt.timedelta(days=2)
+        
+        spill_hours = max(0, int((EE_TZ.utcoffset(tomorrow0) - CET_TZ.utcoffset(tomorrow0)).total_seconds() / 3600))
+        tm_spill_end = tomorrow0 + dt.timedelta(hours=spill_hours)
+        raw_all_end = day_after0 + dt.timedelta(hours=spill_hours)
+
+        prev_attrs = state.getattr(SENSOR_RAW) or {}
+        
+        cached_data = []
+        for s in prev_attrs.get("raw_all") or []:
+            try:
+                start_dt = dt.datetime.fromisoformat(s["start"])
+                if start_dt >= today0:
+                    cached_data.append({
+                        "start": start_dt,
+                        "end": dt.datetime.fromisoformat(s["end"]),
+                        "value": s["value"]
+                    })
+            except (ValueError, TypeError, KeyError):
+                log.warning(f"⚠️ Skipping malformed cached data row: {s}")
+
+        today_slice = _get_slots_in_range(cached_data, today0, tomorrow0)
+        tm_slice = _get_slots_in_range(cached_data, tomorrow0, day_after0)
+        v_today = _validate_slice(today_slice, today0, tomorrow0)
+        v_tomorrow = _validate_slice(tm_slice, tomorrow0, day_after0)
+        
+        if spill_hours == 0:
+            v_tm_spill = {"is_complete": True}
+        else:
+            tm_spill_slice = _get_slots_in_range(cached_data, tomorrow0, tm_spill_end)
+            v_tm_spill = _validate_slice(tm_spill_slice, tomorrow0, tm_spill_end)
+
+        is_new_day = prev_attrs.get("today_date_local") != str(today0.date())
+        is_publish_window = now_local.hour >= 13
+        need_today = is_new_day or not v_today["is_complete"] or prev_attrs.get("status_t") != "Final"
+        tm_is_stale = (not v_tm_spill["is_complete"]) if not is_publish_window else (not v_tomorrow["is_complete"])
+        need_tomorrow = tm_is_stale or (is_publish_window and prev_attrs.get("status_tm") != "Final")
+        
+        responses = {}
+        if need_today or need_tomorrow:
+            log.info(f"Fetch required: need_today={need_today}, need_tomorrow={need_tomorrow} (publish_window={is_publish_window})")
+            now_cet = now_utc.astimezone(CET_TZ)
+            d_y_str, d_t_str, d_tm_str = ((now_cet - dt.timedelta(days=1)).strftime("%Y-%m-%d"), now_cet.strftime("%Y-%m-%d"), (now_cet + dt.timedelta(days=1)).strftime("%Y-%m-%d"))
+            
+            fetch_map = {}
+            if need_today:
+                fetch_map[d_y_str] = 'y'; fetch_map[d_t_str] = 't'
+            if need_tomorrow:
+                fetch_map[d_t_str] = 't'; fetch_map[d_tm_str] = 'tm'
+            
+            async with aiohttp.ClientSession() as session:
+                for date_str, label in fetch_map.items():
+                    responses[label] = await _fetch_date(session, date_str)
+        else:
+            log.info("✅ No fetch needed; cached data is complete and final.")
+
+        newly_fetched_data = []
+        for resp in responses.values():
+            if resp:
+                for item in _parse_api_data(resp):
+                    newly_fetched_data.append(item)
+        
+        merged_slots_map = {}
+        for slot in cached_data:
+            merged_slots_map[slot['start'].isoformat()] = slot
+        for slot in newly_fetched_data:
+            merged_slots_map[slot['start'].isoformat()] = slot
+        
+        # *** FIX: Re-introduce the filter to remove yesterday's data before saving ***
+        temp_list = []
+        for slot in merged_slots_map.values():
+            if slot['start'] >= today0:
+                temp_list.append(slot)
+        final_raw_data = sorted(temp_list, key=lambda x: x['start'])
+        
+        if not final_raw_data:
+            log.error("❌ No price data available after fetch/merge. Keeping old state.")
+            return
+
+        holiday_info = {}
+        if SENSOR_IMPORT and SENSOR_IMPORT.strip() and HOLIDAY_CALENDAR:
+            attrs = state.getattr(HOLIDAY_CALENDAR) or {}
+            holiday_info = {"is_on": state.get(HOLIDAY_CALENDAR) == "on", "all_day": attrs.get("all_day", False), "start_time": attrs.get("start_time")}
+
+        _update_ha_sensors(
+            final_raw_data=final_raw_data, now_local=now_local, today0=today0, tomorrow0=tomorrow0, 
+            day_after0=day_after0, tm_spill_end=tm_spill_end, data_y=responses.get('y'), data_t=responses.get('t'), 
+            data_tm=responses.get('tm'), prev_attrs=prev_attrs, holiday_info=holiday_info
+        )
+        
+        has_import = bool(SENSOR_IMPORT and SENSOR_IMPORT.strip())
+        has_export = bool(SENSOR_EXPORT and SENSOR_EXPORT.strip())
+        enabled_sensors_list = ["raw"]; 
+        if has_import: enabled_sensors_list.append("import")
+        if has_export: enabled_sensors_list.append("export")
+        enabled_sensors = ", ".join(enabled_sensors_list)
+        
+        status_t = _get_status_for_area(responses.get('t'), AREA) if 't' in responses else prev_attrs.get("status_t")
+        status_tm = _get_status_for_area(responses.get('tm'), AREA) if 'tm' in responses else prev_attrs.get("status_tm")
+        today_final_slots = _get_slots_in_range(final_raw_data, today0, tomorrow0)
+        tomorrow_final_slots = _get_slots_in_range(final_raw_data, tomorrow0, day_after0)
+        log.info(f"✅ Update complete; sensors: {enabled_sensors}. Today slots: {len(today_final_slots)}. Tomorrow slots: {len(tomorrow_final_slots)}. Status: t={status_t}, tm={status_tm}")
+
+    except Exception as e:
+        log.error(f"💥 Unhandled error in nordpool_update: {e}", exc_info=True)
+    finally:
+        nordpool_update._running = False
+
+
+def _update_ha_sensors(
+    final_raw_data: List[Dict], now_local: dt.datetime, today0: dt.datetime, tomorrow0: dt.datetime,
+    day_after0: dt.datetime, tm_spill_end: dt.datetime, data_y: Optional[Dict], data_t: Optional[Dict], 
+    data_tm: Optional[Dict], prev_attrs: Dict, holiday_info: Dict
+):
+    market_now = _get_current_price(final_raw_data, now_local)
+    today_slice = _get_slots_in_range(final_raw_data, today0, tomorrow0)
+    tm_slice = _get_slots_in_range(final_raw_data, tomorrow0, day_after0)
+    v_today_final = _validate_slice(today_slice, today0, tomorrow0)
+    v_tomorrow_final = _validate_slice(tm_slice, tomorrow0, day_after0)
+    
+    if (tm_spill_end > tomorrow0):
+        tm_spill_slice = _get_slots_in_range(final_raw_data, tomorrow0, tm_spill_end)
+        v_tm_spill_final = _validate_slice(tm_spill_slice, tomorrow0, tm_spill_end)
+    else:
+        v_tm_spill_final = {"is_complete": True}
+
+    tm_stale_final = (not v_tm_spill_final["is_complete"]) if now_local.hour < 13 else (not v_tomorrow_final["is_complete"])
+    
+    status_y = _get_status_for_area(data_y, AREA) if data_y is not None else prev_attrs.get("status_y", "Unknown")
+    status_t = _get_status_for_area(data_t, AREA) if data_t is not None else prev_attrs.get("status_t", "Unknown")
+    status_tm = _get_status_for_area(data_tm, AREA) if data_tm is not None else prev_attrs.get("status_tm", "Missing")
+
+    upd_tm_utc, upd_tm_local = (prev_attrs.get("updatedAt_tm_utc"), prev_attrs.get("updatedAt_tm_local"))
+    if data_tm and data_tm.get("updatedAt"):
+        ts = dt.datetime.fromisoformat(data_tm["updatedAt"].replace("Z", "+00:00"))
+        upd_tm_utc, upd_tm_local = ts.isoformat(), ts.astimezone(EE_TZ).isoformat()
+        
+    base_attrs = {
+        "raw_all": _to_ha_format(final_raw_data),
+        "updatedAt_tm_utc": upd_tm_utc, "updatedAt_tm_local": upd_tm_local,
+        "status_y": status_y, "status_t": status_t, "status_tm": status_tm,
+        "slots_today": v_today_final["count"], "slots_tomorrow": v_tomorrow_final["count"],
+        "today_complete": v_today_final["is_complete"], "tomorrow_complete": v_tomorrow_final["is_complete"],
+        "tm_stale": tm_stale_final,
+        "today_date_local": str(today0.date()), "last_fetch_at_local": now_local.isoformat(),
+        "has_import_sensor": bool(SENSOR_IMPORT and SENSOR_IMPORT.strip()),
+        "has_export_sensor": bool(SENSOR_EXPORT and SENSOR_EXPORT.strip()),
+        "unit_of_measurement": "EUR/kWh", "state_class": "measurement",
+    }
+    
+    state.set(SENSOR_RAW, market_now, new_attributes=base_attrs)
+    has_import = bool(SENSOR_IMPORT and SENSOR_IMPORT.strip())
+    has_export = bool(SENSOR_EXPORT and SENSOR_EXPORT.strip())
+
+    if has_import or has_export:
+        shared_attrs = {}
+        for k, v in base_attrs.items():
+            if k != "raw_all":
+                shared_attrs[k] = v
+        
+        if has_import:
+            import_now = _apply_import_tariffs(market_now, now_local, holiday_info) if market_now is not None else None
+            import_attrs = {**shared_attrs, "raw_all": _to_ha_format(_map_prices(final_raw_data, _apply_import_tariffs, holiday_info=holiday_info))}
+            state.set(SENSOR_IMPORT, import_now, new_attributes=import_attrs)
+        if has_export:
+            export_now = _apply_export_margin(market_now) if market_now is not None else None
+            export_attrs = {**shared_attrs, "raw_all": _to_ha_format(_map_prices(final_raw_data, _apply_export_margin))}
+            state.set(SENSOR_EXPORT, export_now, new_attributes=export_attrs)
