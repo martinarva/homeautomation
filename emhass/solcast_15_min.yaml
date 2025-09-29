@@ -1,54 +1,57 @@
 template:
   - sensor:
-    - name: "solcast_pv_forecast_forecast_today_15min"
-      state: "{{ states('sensor.solcast_pv_forecast_forecast_today') }}"
-      attributes:
-        state_class: total
-        dayname: "{{ state_attr('sensor.solcast_pv_forecast_forecast_today', 'dayname') }}"
-        dataCorrect: "{{ state_attr('sensor.solcast_pv_forecast_forecast_today', 'dataCorrect') }}"
-        detailedForecast: >
-          {% set data = state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedForecast') %}
-          {% set expanded = namespace(entries=[]) %}
-          {% for item in data %}
-            {% set start_time = item.period_start %}
-            {% set value = item.pv_estimate %}
-            {% set start_dt = as_datetime(start_time) %}
+      - name: "Solcast PV Combined Forecast 15min"
+        unique_id: solcast_pv_forecast_combined_15min
+        state_class: "total"
+        unit_of_measurement: "kWh"
+        device_class: "energy"
+        icon: "mdi:solar-power-variant"
+        state: >
+          {# Calculate the total energy: today + tomorrow + first 3 hours of day 3 #}
+          {% set today_kwh = states('sensor.solcast_pv_forecast_forecast_today') | float(0) %}
+          {% set tomorrow_kwh = states('sensor.solcast_pv_forecast_forecast_tomorrow') | float(0) %}
 
-            {# Split the 30-minute period into two 15-minute intervals #}
-            {% for i in range(0, 2) %}
-              {% set new_start = (start_dt + timedelta(minutes=i * 15)) %}
-              {% set new_value = value %}  {# Use the same value for both 15-minute intervals #}
-              {% set expanded.entries = expanded.entries + [{
-                'period_start': new_start | as_timestamp,
-                'pv_estimate': new_value
-              }] %}
+          {# Calculate energy for the first 3 hours of day 3 (6 x 30min periods) #}
+          {% set day3_forecast = state_attr('sensor.solcast_pv_forecast_forecast_day_3', 'detailedForecast')[:6] %}
+          {% set day3_kwh = namespace(value=0) %}
+          {% if day3_forecast %}
+            {% for item in day3_forecast %}
+              {# Energy (kWh) = Power (kW) * Time (hours). A 30min period is 0.5h. #}
+              {% set day3_kwh.value = day3_kwh.value + (item.pv_estimate * 0.5) %}
             {% endfor %}
-          {% endfor %}
-          {{ expanded.entries }}
+          {% endif %}
+          
+          {{ (today_kwh + tomorrow_kwh + day3_kwh.value) | round(2) }}
 
-  - sensor:
-    - name: "solcast_pv_forecast_forecast_tomorrow_15min"
-      state: "{{ states('sensor.solcast_pv_forecast_forecast_tomorrow') }}"
-      attributes:
-        state_class: total
-        dayname: "{{ state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'dayname') }}"
-        dataCorrect: "{{ state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'dataCorrect') }}"
-        detailedForecast: >
-          {% set data = state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedForecast') %}
-          {% set expanded = namespace(entries=[]) %}
-          {% for item in data %}
-            {% set start_time = item.period_start %}
-            {% set value = item.pv_estimate %}
-            {% set start_dt = as_datetime(start_time) %}
-
-            {# Split the 30-minute period into two 15-minute intervals #}
-            {% for i in range(0, 2) %}
-              {% set new_start = (start_dt + timedelta(minutes=i * 15)) %}
-              {% set new_value = value %}  {# Use the same value for both 15-minute intervals #}
-              {% set expanded.entries = expanded.entries + [{
-                'period_start': new_start | as_timestamp,
-                'pv_estimate': new_value
-              }] %}
+        attributes:
+          detailedForecast: >
+            {% set combined = namespace(entries=[]) %}
+            
+            {# Create a list of the data sources to process #}
+            {% set sources = [
+              state_attr('sensor.solcast_pv_forecast_forecast_today', 'detailedForecast'),
+              state_attr('sensor.solcast_pv_forecast_forecast_tomorrow', 'detailedForecast'),
+              state_attr('sensor.solcast_pv_forecast_forecast_day_3', 'detailedForecast')[:6]
+            ] %}
+            
+            {# Loop through each source (today, tomorrow, day_3[:6]) #}
+            {% for data_list in sources %}
+              {% if data_list is not none %}
+                {# Loop through each 30-minute forecast item in the source #}
+                {% for item in data_list %}
+                  {% set start_dt = as_datetime(item.period_start) %}
+                  {% set value = item.pv_estimate %}
+                  
+                  {# Split the 30-minute period into two 15-minute intervals #}
+                  {% for i in range(2) %}
+                    {% set new_start = (start_dt + timedelta(minutes=i * 15)) %}
+                    {% set combined.entries = combined.entries + [{
+                      'period_start': new_start.isoformat(),
+                      'pv_estimate': value
+                    }] %}
+                  {% endfor %}
+                {% endfor %}
+              {% endif %}
             {% endfor %}
-          {% endfor %}
-          {{ expanded.entries }}
+            
+            {{ combined.entries }}
