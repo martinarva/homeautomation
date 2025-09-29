@@ -12,7 +12,9 @@ Creates/updates:
            today_first_slot, today_last_slot, today_complete
            tm_first_slot, tm_last_slot, tomorrow_complete, tm_stale
            today_date_local, tomorrow_date_local_expected
+           expected_slots_tomorrow_spill, slots_tomorrow_spill, tomorrow_spill_complete
            last_fetch_at_local
+           unit_of_measurement="EUR/kWh", state_class="measurement"
 
 Scheduling:
 - Runs on startup
@@ -21,11 +23,11 @@ Scheduling:
 
 Install:
 - Save as apps/pyscript/nordpool_15min_raw_only.py (or any .py under pyscript/)
-- Create helper sensor: sensor.nordpool_15_min_raw_pyscript (unit: EUR/kWh, state class: measurement)
+- Create helper sensor: sensor.nordpool_15_min_raw_pyscript
 
 Notes:
 - Handles CET↔EE spill hour.
-- Validates “today/tomorrow” windows by date/contiguity instead of only counting slots.
+- Validates “today/tomorrow” by exact windows (bounds/contiguity/count), not only counts.
 """
 
 import json
@@ -53,7 +55,7 @@ except Exception:
 API_BASE = "https://dataportal-api.nordpoolgroup.com/api/DayAheadPriceIndices"
 HEADERS  = {
     "Accept": "application/json",
-    "User-Agent": "HomeAssistant-Pyscript-Nordpool/1.5 (+raw_only)"
+    "User-Agent": "HomeAssistant-Pyscript-Nordpool/1.6 (+raw_only)"
 }
 
 # ---------- HTTP / parsing helpers ----------
@@ -112,59 +114,80 @@ def _status_for_area(data: dict | None, area: str) -> tuple[str, list]:
 
 # ---------- slot utilities ----------
 def _expected_slots(start_local: dt.datetime, end_local: dt.datetime) -> int:
-    # 15-minute buckets; handles DST (92/96/100) by computing exact seconds
+    # 15-min buckets; handles DST (92/96/100) by computing exact 900s steps
     seconds = int((end_local - start_local).total_seconds())
     return max(0, seconds // (15 * 60))
-
-def _count_slots_in_range(raw_all, start_local: dt.datetime, end_local: dt.datetime) -> int:
-    n = 0
-    for row in raw_all or []:
-        try:
-            sl = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
-            if start_local <= sl < end_local:
-                n += 1
-        except Exception:
-            continue
-    return n
 
 def _slice_slots(raw_all, start_local: dt.datetime, end_local: dt.datetime):
     out = []
     for row in raw_all or []:
         try:
             sl = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
+            el = dt.datetime.strptime(row["end"],   "%Y-%m-%dT%H:%M:%S%z")
             if start_local <= sl < end_local:
                 out.append(row)
         except Exception:
             continue
     return out
 
-def _first_last(raw_all, start_local, end_local):
-    slots = _slice_slots(raw_all, start_local, end_local)
-    if not slots:
-        return (None, None)
-    return (slots[0]["start"], slots[-1]["end"])
+def _validate_slice(raw_slice, start_local: dt.datetime, end_local: dt.datetime):
+    """
+    Validates that:
+      - first slot starts at start_local
+      - last slot ends at end_local
+      - slots are 15-min contiguous (no gaps/overlaps)
+      - count equals expected (by exact seconds / 900)
+    Returns dict with booleans and diagnostics.
+    """
+    info = {
+        "coverage_ok": False,
+        "bounds_ok": False,
+        "contiguous_ok": False,
+        "count_ok": False,
+        "first": None,
+        "last": None,
+        "count": 0,
+        "expected": _expected_slots(start_local, end_local),
+    }
+    if not raw_slice:
+        return info
 
-def _is_contiguous_15m(raw_all, start_local, end_local):
-    """Check 15-min contiguity over [start_local, end_local)."""
-    slots = _slice_slots(raw_all, start_local, end_local)
-    if not slots:
-        return False
-    try:
-        # Ensure sorted
-        slots.sort(key=lambda r: r["start"])
-        prev_end = dt.datetime.strptime(slots[0]["start"], "%Y-%m-%dT%H:%M:%S%z")
-        for row in slots:
-            s = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
-            e = dt.datetime.strptime(row["end"],   "%Y-%m-%dT%H:%M:%S%z")
-            if s != prev_end:
-                return False
-            if (e - s).total_seconds() != 900:
-                return False
-            prev_end = e
-        # Last slot must reach end_local (or up to raw_all_end if checking tm+spill; we pass exact window)
-        return prev_end == end_local
-    except Exception:
-        return False
+    parsed = []
+    for row in raw_slice:
+        try:
+            sl = dt.datetime.strptime(row["start"], "%Y-%m-%dT%H:%M:%S%z")
+            el = dt.datetime.strptime(row["end"],   "%Y-%m-%dT%H:%M:%S%z")
+            parsed.append((sl, el))
+        except Exception:
+            pass
+    if not parsed:
+        return info
+
+    parsed.sort(key=lambda x: x[0])
+    info["first"] = _fmt_local(parsed[0][0])
+    info["last"]  = _fmt_local(parsed[-1][1])
+    info["count"] = len(parsed)
+
+    # bounds
+    bounds_ok = (parsed[0][0] == start_local and parsed[-1][1] == end_local)
+    info["bounds_ok"] = bounds_ok
+
+    # contiguity
+    contiguous_ok = True
+    step = dt.timedelta(minutes=15)
+    for i in range(1, len(parsed)):
+        if parsed[i-1][1] != parsed[i][0]:
+            contiguous_ok = False
+            break
+        if (parsed[i][0] - parsed[i-1][0]) != step:
+            contiguous_ok = False
+            break
+    info["contiguous_ok"] = contiguous_ok
+
+    # count & coverage
+    info["count_ok"] = (len(parsed) == info["expected"])
+    info["coverage_ok"] = (bounds_ok and contiguous_ok and info["count_ok"])
+    return info
 
 # ---------- builders ----------
 def _combine_to_raw_all(combined, start_local, end_local):
@@ -174,7 +197,6 @@ def _combine_to_raw_all(combined, start_local, end_local):
         for e in combined
         if (start_local <= e["sl"] < end_local)
     ]
-    # keep order consistent
     out.sort(key=lambda r: r["start"])
     return out
 
@@ -216,37 +238,57 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         tomorrow0 = today0 + dt.timedelta(days=1)
         day_after0= today0 + dt.timedelta(days=2)
 
-        # Spill window for end bound
+        # Spill hour computation (difference EE vs CET at tomorrow boundary)
         spill_hours = int((EE_TZ.utcoffset(tomorrow0) - CET_TZ.utcoffset(tomorrow0)).total_seconds() // 3600)
         spill_hours = max(0, spill_hours)
         raw_all_end = day_after0 + dt.timedelta(hours=spill_hours)
 
-        # Purge any stale slots (< today0) from cache (midnight rollover safety)
+        # NEW: explicit “tomorrow spill” window (00:00–01:00 if spill_hours==1)
+        tm_spill_start = tomorrow0
+        tm_spill_end   = tomorrow0 + dt.timedelta(hours=spill_hours)
+
+        # Purge cache to [today0, raw_all_end)
         if cached_raw_all:
-            try:
-                cached_raw_all = [r for r in cached_raw_all
-                                  if dt.datetime.strptime(r["start"], "%Y-%m-%dT%H:%M:%S%z") >= today0]
-            except Exception:
-                pass
+            cached_raw_all = _slice_slots(cached_raw_all, today0, raw_all_end)
 
-        # Expected counts
-        expected_today    = _expected_slots(today0,   tomorrow0)
-        expected_tomorrow = _expected_slots(tomorrow0, day_after0)
+        # Cached slices & validation
+        today_slice_cached  = _slice_slots(cached_raw_all, today0,   tomorrow0)
+        tm_slice_cached     = _slice_slots(cached_raw_all, tomorrow0, day_after0)
 
-        # Cached counts
-        slots_today_cached    = _count_slots_in_range(cached_raw_all, today0,   tomorrow0)
-        slots_tomorrow_cached = _count_slots_in_range(cached_raw_all, tomorrow0, day_after0)
+        expected_today      = _expected_slots(today0,   tomorrow0)
+        expected_tomorrow   = _expected_slots(tomorrow0, day_after0)
 
-        # Contiguity validation
-        today_contig_ok    = _is_contiguous_15m(cached_raw_all, today0,   tomorrow0) if slots_today_cached == expected_today else False
-        tomorrow_contig_ok = _is_contiguous_15m(cached_raw_all, tomorrow0, raw_all_end) if slots_tomorrow_cached >= expected_tomorrow else False
+        v_today    = _validate_slice(today_slice_cached, today0,   tomorrow0)
+        v_tm_full  = _validate_slice(tm_slice_cached,    tomorrow0, day_after0)
+        v_tm_spill = _validate_slice(
+            _slice_slots(cached_raw_all, tm_spill_start, tm_spill_end),
+            tm_spill_start, tm_spill_end
+        ) if spill_hours > 0 else {
+            "coverage_ok": True, "count": 0, "expected": 0, "first": None, "last": None,
+            "bounds_ok": True, "contiguous_ok": True, "count_ok": True
+        }
 
-        # Decide whether to fetch
-        need_y_t = (slots_today_cached < expected_today) or (not today_contig_ok) or (prev_status_t and prev_status_t != "Final")
+        # Only chase tm after 13:00 local (pre-13:00: require spill only)
         tomorrow_window = (now_local.hour >= 13)
+
+        need_y_t = False
         need_tm  = False
+
+        # Need today?
+        if not v_today["coverage_ok"]:
+            need_y_t = True
+        elif (prev_status_t and prev_status_t != "Final"):
+            need_y_t = True
+        else:
+            prev_status_t = prev_status_t or "Final"
+
+        # Need tomorrow?
+        tm_stale = (not v_tm_spill["coverage_ok"]) if (now_local.hour < 13) else (not v_tm_full["coverage_ok"])
         if tomorrow_window:
-            need_tm = (slots_tomorrow_cached < expected_tomorrow) or (not tomorrow_contig_ok) or (prev_status_tm and prev_status_tm != "Final")
+            if tm_stale:
+                need_tm = True
+            elif (prev_status_tm and prev_status_tm != "Final"):
+                need_tm = True
 
         combined = []
         data_y = data_t = data_tm = None
@@ -254,37 +296,55 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         # Early exit if nothing needed and we have cache
         if not need_y_t and not need_tm and cached_raw_all:
             market_now = _price_now_from_raw_all(cached_raw_all, now_local)
-            today_first, today_last = _first_last(cached_raw_all, today0, tomorrow0)
-            tm_first, tm_last       = _first_last(cached_raw_all, tomorrow0, raw_all_end)
+
+            # spill diagnostics from cache
+            tm_slice_spill_cached = _slice_slots(cached_raw_all, tm_spill_start, tm_spill_end) if spill_hours > 0 else []
+            v_tm_spill_cached = _validate_slice(tm_slice_spill_cached, tm_spill_start, tm_spill_end) if spill_hours > 0 else {
+                "coverage_ok": True, "count": 0, "expected": 0, "first": None, "last": None,
+                "bounds_ok": True, "contiguous_ok": True, "count_ok": True
+            }
 
             base_attrs = {
                 **prev_attrs,
                 "raw_all": cached_raw_all,
                 "status_t": prev_status_t or "Final",
-                "status_tm": prev_status_tm or ("Final" if slots_tomorrow_cached >= expected_tomorrow else "Missing"),
-                "slots_today": slots_today_cached,
-                "slots_tomorrow": slots_tomorrow_cached,
+                "status_tm": prev_status_tm or ("Final" if v_tm_full["coverage_ok"] else "Missing"),
+
+                "slots_today": v_today["count"],
+                "slots_tomorrow": v_tm_full["count"],
                 "slots_all": len(cached_raw_all),
                 "expected_slots_today": expected_today,
                 "expected_slots_tomorrow": expected_tomorrow,
-                "today_first_slot": today_first,
-                "today_last_slot":  today_last,
-                "today_complete":   today_contig_ok and (slots_today_cached == expected_today),
-                "tm_first_slot": tm_first,
-                "tm_last_slot":  tm_last,
-                "tomorrow_complete": slots_tomorrow_cached >= expected_tomorrow and tomorrow_contig_ok,
-                "tm_stale": not tomorrow_contig_ok,
-                "today_date_local": today0.strftime("%Y-%m-%d"),
-                "tomorrow_date_local_expected": tomorrow0.strftime("%Y-%m-%d"),
+
+                "expected_slots_tomorrow_spill": v_tm_spill_cached["expected"],
+                "slots_tomorrow_spill": v_tm_spill_cached["count"],
+                "tomorrow_spill_complete": v_tm_spill_cached["coverage_ok"],
+
+                "today_first_slot": v_today["first"],
+                "today_last_slot":  v_today["last"],
+                "today_complete":   v_today["coverage_ok"],
+
+                "tm_first_slot":    v_tm_full["first"],
+                "tm_last_slot":     v_tm_full["last"],
+                "tomorrow_complete": v_tm_full["coverage_ok"],
+
+                "tm_stale": tm_stale,
+                "today_date_local": str(today0.date()),
+                "tomorrow_date_local_expected": str(tomorrow0.date()),
                 "last_fetch_at_local": prev_attrs.get("last_fetch_at_local"),
+
+                # HA graphing
                 "unit_of_measurement": "EUR/kWh",
                 "state_class": "measurement",
             }
 
             state.set(SENSOR_RAW, market_now, new_attributes=base_attrs)
-            log.info("✅ No fetch needed; cache valid. Today=%d/%d (contig=%s), Tomorrow=%d/%d (contig=%s)",
-                     slots_today_cached, expected_today, today_contig_ok,
-                     slots_tomorrow_cached, expected_tomorrow, tomorrow_contig_ok)
+            log.info(
+                "✅ No fetch; cache OK. Today=%d/%d ok=%s | Tomorrow=%d/%d ok=%s (spill %d/%d ok=%s)",
+                v_today["count"], expected_today, v_today["coverage_ok"],
+                v_tm_full["count"], expected_tomorrow, v_tm_full["coverage_ok"],
+                v_tm_spill_cached["count"], v_tm_spill_cached["expected"], v_tm_spill_cached["coverage_ok"]
+            )
             return
 
         # Build CET dates for fetch
@@ -328,14 +388,20 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
 
         if need_y_t and combined:
             rebuilt_today = _combine_to_raw_all(combined, today0, tomorrow0)
-            # Keep any cached tomorrow+spill; we’ll replace tomorrow if need_tm is true
-            tomorrow_cached_slice = _slice_slots(cached_raw_all, tomorrow0, day_after0)
-            spill_tail            = _slice_slots(cached_raw_all, day_after0, raw_all_end)
-            merged_raw_all = rebuilt_today + tomorrow_cached_slice + spill_tail
+
+            spill_from_t = []
+            if spill_hours > 0:
+                spill_from_t = _combine_to_raw_all(combined, tomorrow0, tomorrow0 + dt.timedelta(hours=spill_hours))
+
+            # Keep cached tomorrow only if it was already valid (rare at midnight)
+            tomorrow_cached_slice = tm_slice_cached if v_tm_full["coverage_ok"] else []
+
+            merged_raw_all = rebuilt_today + spill_from_t + tomorrow_cached_slice
 
         if need_tm and combined:
-            rebuilt_tm = _combine_to_raw_all(combined, tomorrow0, raw_all_end)
-            kept_today = _slice_slots(merged_raw_all, today0, tomorrow0)
+            # Rebuild tomorrow slice (tomorrow+spill) from t+tm datasets
+            rebuilt_tm  = _combine_to_raw_all(combined, tomorrow0, raw_all_end)
+            kept_today  = _slice_slots(merged_raw_all, today0, tomorrow0)
             merged_raw_all = kept_today + rebuilt_tm
 
         if not merged_raw_all:
@@ -346,19 +412,32 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         except Exception:
             pass
 
-        # Recompute counts/validations
-        slots_today    = _count_slots_in_range(merged_raw_all, today0,   tomorrow0)
-        slots_tomorrow = _count_slots_in_range(merged_raw_all, tomorrow0, day_after0)
-        today_first, today_last = _first_last(merged_raw_all, today0, tomorrow0)
-        tm_first, tm_last       = _first_last(merged_raw_all, tomorrow0, raw_all_end)
+        # Recompute validations
+        today_slice    = _slice_slots(merged_raw_all, today0,   tomorrow0)
+        tm_slice_full  = _slice_slots(merged_raw_all, tomorrow0, day_after0)
+        tm_slice_spill = _slice_slots(merged_raw_all, tm_spill_start, tm_spill_end) if spill_hours > 0 else []
 
-        today_contig_ok    = _is_contiguous_15m(merged_raw_all, today0,   tomorrow0) if slots_today == expected_today else False
-        tomorrow_contig_ok = _is_contiguous_15m(merged_raw_all, tomorrow0, raw_all_end) if slots_tomorrow >= expected_tomorrow else False
+        v_today2       = _validate_slice(today_slice,    today0,       tomorrow0)
+        v_tm2_full     = _validate_slice(tm_slice_full,  tomorrow0,    day_after0)
+        v_tm2_spill    = _validate_slice(tm_slice_spill, tm_spill_start, tm_spill_end) if spill_hours > 0 else {
+            "coverage_ok": True, "count": 0, "expected": 0, "first": None, "last": None,
+            "bounds_ok": True, "contiguous_ok": True, "count_ok": True
+        }
+
+        slots_today          = v_today2["count"]
+        slots_tomorrow       = v_tm2_full["count"]
+        slots_tomorrow_spill = v_tm2_spill["count"]
+
+        # Time-aware staleness
+        tm_stale2 = (not v_tm2_spill["coverage_ok"]) if (now_local.hour < 13) else (not v_tm2_full["coverage_ok"])
 
         # Statuses & area states
         status_y, areaStates_y   = _status_for_area(data_y,  area) if need_y_t else (prev_attrs.get("status_y") or "Unknown", prev_attrs.get("areaStates_y") or [])
-        status_t, areaStates_t   = _status_for_area(data_t,  area) if need_y_t else (prev_attrs.get("status_t") or ("Final" if today_contig_ok and slots_today==expected_today else "Unknown"), prev_attrs.get("areaStates_t") or [])
-        status_tm, areaStates_tm = _status_for_area(data_tm, area) if need_tm  else (prev_attrs.get("status_tm") or ("Final" if tomorrow_contig_ok and slots_tomorrow>=expected_tomorrow else "Missing"), prev_attrs.get("areaStates_tm") or [])
+        status_t, areaStates_t   = _status_for_area(data_t,  area) if need_y_t else (prev_attrs.get("status_t") or ("Final" if v_today2["coverage_ok"] else "Unknown"), prev_attrs.get("areaStates_t") or [])
+        status_tm, areaStates_tm = _status_for_area(data_tm, area) if need_tm  else (
+            prev_attrs.get("status_tm") or ("Final" if v_tm2_full["coverage_ok"] else "Missing"),
+            prev_attrs.get("areaStates_tm") or []
+        )
 
         # updatedAt for tm
         upd_tm_utc_prev   = prev_attrs.get("updatedAt_tm_utc")
@@ -386,29 +465,43 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             "areaStates_y": areaStates_y,
             "areaStates_t": areaStates_t,
             "areaStates_tm": areaStates_tm,
+
             "slots_today": slots_today,
             "slots_tomorrow": slots_tomorrow,
             "slots_all": len(merged_raw_all),
             "expected_slots_today": expected_today,
             "expected_slots_tomorrow": expected_tomorrow,
-            "today_first_slot": today_first,
-            "today_last_slot":  today_last,
-            "today_complete":   today_contig_ok and (slots_today == expected_today),
-            "tm_first_slot": tm_first,
-            "tm_last_slot":  tm_last,
-            "tomorrow_complete": slots_tomorrow >= expected_tomorrow and tomorrow_contig_ok,
-            "tm_stale": not tomorrow_contig_ok,
-            "today_date_local": today0.strftime("%Y-%m-%d"),
-            "tomorrow_date_local_expected": tomorrow0.strftime("%Y-%m-%d"),
+
+            # Spill diagnostics
+            "expected_slots_tomorrow_spill": v_tm2_spill["expected"],
+            "slots_tomorrow_spill": slots_tomorrow_spill,
+            "tomorrow_spill_complete": v_tm2_spill["coverage_ok"],
+
+            "today_first_slot": v_today2["first"],
+            "today_last_slot":  v_today2["last"],
+            "today_complete":   v_today2["coverage_ok"],
+
+            "tm_first_slot":    v_tm2_full["first"],
+            "tm_last_slot":     v_tm2_full["last"],
+            "tomorrow_complete": v_tm2_full["coverage_ok"],
+
+            "tm_stale": tm_stale2,
+            "today_date_local": str(today0.date()),
+            "tomorrow_date_local_expected": str(tomorrow0.date()),
             "last_fetch_at_local": _fmt_local(now_local),
+
+            # HA graphing
+            "unit_of_measurement": "EUR/kWh",
+            "state_class": "measurement",
         }
 
         state.set(SENSOR_RAW, market_now, new_attributes=base_attrs)
 
         log.info(
-            "✅ Fetched/merged as needed: today %d/%d (contig=%s), tomorrow %d/%d (contig=%s); status t=%s, tm=%s",
-            slots_today, expected_today, today_contig_ok,
-            slots_tomorrow, expected_tomorrow, tomorrow_contig_ok,
+            "✅ Fetched/merged: today %d/%d ok=%s | tomorrow %d/%d ok=%s (spill %d/%d ok=%s); status t=%s, tm=%s",
+            slots_today, expected_today, v_today2["coverage_ok"],
+            slots_tomorrow, expected_tomorrow, v_tm2_full["coverage_ok"],
+            slots_tomorrow_spill, v_tm2_spill["expected"], v_tm2_spill["coverage_ok"],
             status_t, status_tm
         )
 
