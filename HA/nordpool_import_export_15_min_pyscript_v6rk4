@@ -324,7 +324,11 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         spill_hours = int((EE_TZ.utcoffset(tomorrow0) - CET_TZ.utcoffset(tomorrow0)).total_seconds() // 3600)
         spill_hours = max(0, spill_hours)
         raw_all_end = day_after0 + dt.timedelta(hours=spill_hours)
-
+        
+        # Window for "tomorrow spill" (the first local hour of tomorrow, if any)
+        tm_spill_start = tomorrow0
+        tm_spill_end   = tomorrow0 + dt.timedelta(hours=spill_hours)
+        
         # Purge anything < today0 so yesterday can't linger
         if cached_raw_all:
             cached_raw_all = _slice_slots(cached_raw_all, today0, raw_all_end)
@@ -335,8 +339,15 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         expected_today        = _expected_slots(today0, tomorrow0)
         expected_tomorrow     = _expected_slots(tomorrow0, day_after0)
 
-        v_today = _validate_slice(today_slice_cached, today0, tomorrow0)
-        v_tm    = _validate_slice(tm_slice_cached,    tomorrow0, day_after0)
+        v_today       = _validate_slice(today_slice_cached, today0,   tomorrow0)
+        v_tm_full     = _validate_slice(tm_slice_cached,    tomorrow0, day_after0)
+        v_tm_spill    = _validate_slice(
+            _slice_slots(cached_raw_all, tm_spill_start, tm_spill_end),
+            tm_spill_start, tm_spill_end
+        ) if spill_hours > 0 else {
+            "coverage_ok": True, "count": 0, "expected": 0, "first": None, "last": None,
+            "bounds_ok": True, "contiguous_ok": True, "count_ok": True
+        }
 
         # Midnight rollover detection
         is_new_day = (prev_today_date != str(today0.date()))
@@ -358,7 +369,12 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             prev_status_t = prev_status_t or "Final"
 
         # Decide whether we need tomorrow
-        tm_stale = not v_tm["coverage_ok"]
+        # Before 13:00 local → only the spill window is required.
+        # From 13:00 onward → full tomorrow must be complete.
+        if now_local.hour < 13:
+            tm_stale = not v_tm_spill["coverage_ok"]
+        else:
+            tm_stale = not v_tm_full["coverage_ok"]
         if tomorrow_window:
             if tm_stale:
                 need_tm = True
@@ -372,24 +388,42 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         if not need_y_t and not need_tm and cached_raw_all:
             market_now = _price_now_from_raw_all(cached_raw_all, now_local)
 
+            # Recompute spill slice from cache for diagnostics
+            tm_slice_spill_cached = _slice_slots(cached_raw_all, tm_spill_start, tm_spill_end) if spill_hours > 0 else []
+            v_tm_spill_cached = _validate_slice(tm_slice_spill_cached, tm_spill_start, tm_spill_end) if spill_hours > 0 else {
+                "coverage_ok": True, "count": 0, "expected": 0, "first": None, "last": None,
+                "bounds_ok": True, "contiguous_ok": True, "count_ok": True
+            }
+
             base_attrs = {
                 **prev_attrs,
                 "raw_all": cached_raw_all,
                 "slots_today": v_today["count"],
-                "slots_tomorrow": v_tm["count"],
+                "slots_tomorrow": v_tm_full["count"],
                 "slots_all": len(cached_raw_all),
                 "expected_slots_today": expected_today,
                 "expected_slots_tomorrow": expected_tomorrow,
+
+                # NEW spill diagnostics
+                "expected_slots_tomorrow_spill": v_tm_spill_cached["expected"],
+                "slots_tomorrow_spill": v_tm_spill_cached["count"],
+                "tomorrow_spill_complete": v_tm_spill_cached["coverage_ok"],
+
                 "today_first_slot": v_today["first"],
                 "today_last_slot":  v_today["last"],
                 "today_complete":   v_today["coverage_ok"],
-                "tm_first_slot":    v_tm["first"],
-                "tm_last_slot":     v_tm["last"],
-                "tomorrow_complete": v_tm["coverage_ok"],
+
+                # Switch to FULL tomorrow for these fields
+                "tm_first_slot":    v_tm_full["first"],
+                "tm_last_slot":     v_tm_full["last"],
+                "tomorrow_complete": v_tm_full["coverage_ok"],
+
                 "tm_stale": tm_stale,
                 "today_date_local": str(today0.date()),
                 "tomorrow_date_local_expected": str(tomorrow0.date()),
                 "last_fetch_at_local": prev_attrs.get("last_fetch_at_local"),
+                "unit_of_measurement": "EUR/kWh",
+                "state_class": "measurement",
             }
 
             state_import = _apply_import(market_now, now_local) if market_now is not None else None
@@ -410,6 +444,8 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             export_attrs = {
                 "raw_all": _map_export(cached_raw_all),
                 **{k: import_attrs[k] for k in import_attrs.keys() if k not in ("raw_all",)},
+                "unit_of_measurement": "EUR/kWh",
+                "state_class": "measurement",
             }
 
             state.set(SENSOR_RAW,    market_now, new_attributes=base_attrs)
@@ -418,7 +454,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             log.info(
                 "✅ No fetch needed; kept cache. Today=%d/%d (ok=%s), Tomorrow=%d/%d (ok=%s)",
                 v_today["count"], expected_today, v_today["coverage_ok"],
-                v_tm["count"], expected_tomorrow, v_tm["coverage_ok"]
+                v_tm_full["count"], expected_tomorrow, v_tm_full["coverage_ok"]
             )
             return
 
@@ -465,9 +501,14 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         # If today/yesterday fetched → rebuild today's slice; keep valid tomorrow slice from cache
         if need_y_t and combined:
             rebuilt_today = _combine_to_raw_all(combined, today0, tomorrow0)
-            tomorrow_cached_slice = tm_slice_cached if v_tm["coverage_ok"] else []
-            spill_tail = _slice_slots(cached_raw_all, day_after0, raw_all_end)
-            merged_raw_all = rebuilt_today + tomorrow_cached_slice + spill_tail
+
+            spill_from_t = []
+            if spill_hours > 0:
+                spill_from_t = _combine_to_raw_all(combined, tomorrow0, tomorrow0 + dt.timedelta(hours=spill_hours))
+
+            tomorrow_cached_slice = tm_slice_cached if v_tm_full["coverage_ok"] else []
+
+            merged_raw_all = rebuilt_today + spill_from_t + tomorrow_cached_slice
 
         # If we fetched tm → rebuild tomorrow slice (from t + tm to include spill)
         if need_tm and combined:
@@ -485,18 +526,31 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             pass
 
         # Recompute counts + validity from merged
-        today_slice  = _slice_slots(merged_raw_all, today0,   tomorrow0)
-        tm_slice     = _slice_slots(merged_raw_all, tomorrow0, day_after0)
-        v_today2     = _validate_slice(today_slice, today0, tomorrow0)
-        v_tm2        = _validate_slice(tm_slice,    tomorrow0, day_after0)
-        slots_today    = v_today2["count"]
-        slots_tomorrow = v_tm2["count"]
-        tm_stale2      = not v_tm2["coverage_ok"]
+        today_slice     = _slice_slots(merged_raw_all, today0,   tomorrow0)
+        tm_slice_full   = _slice_slots(merged_raw_all, tomorrow0, day_after0)
+        tm_slice_spill  = _slice_slots(merged_raw_all, tm_spill_start, tm_spill_end) if spill_hours > 0 else []
+
+        v_today2        = _validate_slice(today_slice,    today0,        tomorrow0)
+        v_tm2_full      = _validate_slice(tm_slice_full,  tomorrow0,     day_after0)
+        v_tm2_spill     = _validate_slice(tm_slice_spill, tm_spill_start, tm_spill_end) if spill_hours > 0 else {
+            "coverage_ok": True, "count": 0, "expected": 0, "first": None, "last": None,
+            "bounds_ok": True, "contiguous_ok": True, "count_ok": True
+        }
+
+        slots_today          = v_today2["count"]
+        slots_tomorrow       = v_tm2_full["count"]
+        slots_tomorrow_spill = v_tm2_spill["count"]
+
+        # Time-aware staleness: before 13:00 require spill; from 13:00 require full tomorrow
+        tm_stale2 = (not v_tm2_spill["coverage_ok"]) if (now_local.hour < 13) else (not v_tm2_full["coverage_ok"])
 
         # Determine statuses (keep previous if not fetched)
         status_y, areaStates_y   = _status_for_area(data_y,  area) if need_y_t else (prev_attrs.get("status_y") or "Unknown", prev_attrs.get("areaStates_y") or [])
         status_t, areaStates_t   = _status_for_area(data_t,  area) if need_y_t else (prev_attrs.get("status_t") or ("Final" if v_today2["coverage_ok"] else "Unknown"), prev_attrs.get("areaStates_t") or [])
-        status_tm, areaStates_tm = _status_for_area(data_tm, area) if need_tm  else (prev_attrs.get("status_tm") or ("Final" if v_tm2["coverage_ok"] else "Missing"), prev_attrs.get("areaStates_tm") or [])
+        status_tm, areaStates_tm = _status_for_area(data_tm, area) if need_tm  else (
+            prev_attrs.get("status_tm") or ("Final" if v_tm2_full["coverage_ok"] else "Missing"),
+            prev_attrs.get("areaStates_tm") or []
+        )
 
         # updatedAt for tomorrow only
         upd_tm_utc_prev   = prev_attrs.get("updatedAt_tm_utc")
@@ -526,21 +580,34 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
             "areaStates_y": areaStates_y,
             "areaStates_t": areaStates_t,
             "areaStates_tm": areaStates_tm,
+
             "slots_today": slots_today,
             "slots_tomorrow": slots_tomorrow,
             "slots_all": len(merged_raw_all),
             "expected_slots_today": expected_today,
             "expected_slots_tomorrow": expected_tomorrow,
+
+            # NEW spill diagnostics
+            "expected_slots_tomorrow_spill": v_tm2_spill["expected"],
+            "slots_tomorrow_spill": slots_tomorrow_spill,
+            "tomorrow_spill_complete": v_tm2_spill["coverage_ok"],
+
             "today_first_slot": v_today2["first"],
             "today_last_slot":  v_today2["last"],
             "today_complete":   v_today2["coverage_ok"],
-            "tm_first_slot":    v_tm2["first"],
-            "tm_last_slot":     v_tm2["last"],
-            "tomorrow_complete": v_tm2["coverage_ok"],
+
+            # Use FULL tomorrow here
+            "tm_first_slot":    v_tm2_full["first"],
+            "tm_last_slot":     v_tm2_full["last"],
+            "tomorrow_complete": v_tm2_full["coverage_ok"],
+
             "tm_stale": tm_stale2,
             "today_date_local": str(today0.date()),
             "tomorrow_date_local_expected": str(tomorrow0.date()),
             "last_fetch_at_local": _fmt_local(now_local),
+
+            "unit_of_measurement": "EUR/kWh",
+            "state_class": "measurement",
         }
 
         # States & mapped arrays
@@ -562,6 +629,8 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         export_attrs = {
             "raw_all": _map_export(merged_raw_all),
             **{k: import_attrs[k] for k in import_attrs.keys() if k not in ("raw_all",)},
+            "unit_of_measurement": "EUR/kWh",
+            "state_class": "measurement",
         }
 
         # Push states
@@ -572,7 +641,7 @@ async def nordpool_update(area=AREA, currency=CURRENCY, resolution=RESOLUTION):
         log.info(
             "✅ Fetched as needed: today %d/%d (ok=%s), tomorrow %d/%d (ok=%s); status t=%s, tm=%s",
             slots_today, expected_today, v_today2["coverage_ok"],
-            slots_tomorrow, expected_tomorrow, v_tm2["coverage_ok"],
+            slots_tomorrow, expected_tomorrow, v_tm2_full["coverage_ok"],
             status_t, status_tm
         )
 
