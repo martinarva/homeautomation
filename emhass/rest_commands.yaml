@@ -44,21 +44,13 @@ rest_command:
         "prediction_horizon": {{ forecast_len }},
         "model_type": "load_forecast",
         "pv_power_forecast": {{
-          (
-            [states('sensor.total_pv_power')|int(0)] +
-            state_attr('sensor.solcast_pv_forecast_forecast_today_15min', 'detailedForecast')
-            | selectattr('period_start', 'gt', utcnow() | as_timestamp)
-            | map(attribute='pv_estimate')
-            | map('multiply', 1000)
-            | map('int')
-            | list +
-            state_attr('sensor.solcast_pv_forecast_forecast_tomorrow_15min', 'detailedForecast')
-            | selectattr('period_start', 'gt', utcnow() | as_timestamp)
-            | map(attribute='pv_estimate')
-            | map('multiply', 1000)
-            | map('int')
-            | list
-          ) + [0] * 12
+          [states('sensor.total_pv_power') | int(0)] +
+          state_attr('sensor.solcast_pv_combined_forecast_15min', 'detailedForecast')
+          | selectattr('period_start', 'gt', utcnow().isoformat())
+          | map(attribute='pv_estimate')
+          | map('multiply', 1000)
+          | map('int')
+          | list
         }},
         "soc_init": {{
           [((states('sensor.ss_battery_soc') | int(0)) / 100), 0] | max
