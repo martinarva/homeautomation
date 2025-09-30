@@ -46,7 +46,7 @@ rest_command:
         "pv_power_forecast": {{
           [states('sensor.total_pv_power') | int(0)] +
           state_attr('sensor.solcast_pv_combined_forecast_15min', 'detailedForecast')
-          | selectattr('period_start', 'gt', utcnow().isoformat())
+          | selectattr('period_start', 'gt', now().isoformat())
           | map(attribute='pv_estimate')
           | map('multiply', 1000)
           | map('int')
