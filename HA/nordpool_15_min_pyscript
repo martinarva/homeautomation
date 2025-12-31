@@ -63,14 +63,19 @@ RESOLUTION     = 15  # minutes
 
 # Import tariff components (EUR/kWh)
 IMPORT_TARIFFS = {
-    "alexela_marginaal": 0.0000,
-    "taastuv":           0.0084,
-    "aktsiis":           0.0021,
-    "elektrilevi_p2ev":  0.0369,  # Day tariff
-    "elektrilevi_88":    0.0210,  # Night/weekend/holiday
-    "vat":               1.24,    # Multiplier
+    "alexela_marginaal":            0.0000,
+    "taastuv":                      0.0084,
+    "aktsiis":                      0.0021,
+    "elektrilevi_p2ev":             0.0369,  # Day tariff
+    "elektrilevi_88":               0.0210,  # Night/weekend/holiday
+    "vat":                          1.24,    # Multiplier
 }
-EXPORT_MARGIN = -0.00167  # EUR/kWh (negative -> subtract from market)
+
+EXPORT_MARGIN = -0.01  # EUR/kWh (negative -> subtract from market)
+
+BALANCING_CAPACITY_FEE = {
+    "net_eur_per_kwh": 0.00373, #excluding VAT
+}
 
 # Target helper entities (must exist in HA)
 SENSOR_RAW    = "sensor.nordpool_15_min_raw_pyscript"
@@ -152,12 +157,29 @@ def _is_offpeak(slot_start_local: dt.datetime, holiday_info: Dict[str, Any]) -> 
     return False
 
 def _apply_import_tariffs(price: float, slot_start_local: dt.datetime, holiday_info: Dict[str, Any]) -> float:
-    network_tariff = IMPORT_TARIFFS["elektrilevi_88"] if _is_offpeak(slot_start_local, holiday_info) else IMPORT_TARIFFS["elektrilevi_p2ev"]
-    base = price + IMPORT_TARIFFS["alexela_marginaal"] + IMPORT_TARIFFS["taastuv"] + IMPORT_TARIFFS["aktsiis"] + network_tariff
-    return round(base * IMPORT_TARIFFS["vat"], 3)
+    network_tariff = (
+        IMPORT_TARIFFS["elektrilevi_88"]
+        if _is_offpeak(slot_start_local, holiday_info)
+        else IMPORT_TARIFFS["elektrilevi_p2ev"]
+    )
+
+    energy_base = (
+        price
+        + IMPORT_TARIFFS["alexela_marginaal"]
+        + IMPORT_TARIFFS["taastuv"]
+        + IMPORT_TARIFFS["aktsiis"]
+        + network_tariff
+    )
+
+    balancing_fee = BALANCING_CAPACITY_FEE["net_eur_per_kwh"]
+
+    total_net = energy_base + balancing_fee
+
+    return round(total_net * IMPORT_TARIFFS["vat"], 3)
 
 def _apply_export_margin(price: float, **_) -> float:
-    return round(price + EXPORT_MARGIN, 3)
+    balancing_fee_gross = -BALANCING_CAPACITY_FEE["net_eur_per_kwh"] * IMPORT_TARIFFS["vat"] #balancing fee is with VAT even on export
+    return round(price + EXPORT_MARGIN + balancing_fee_gross, 3)
 
 def _map_prices(raw_data: List[Dict], func: callable, **kwargs) -> List[Dict]:
     out = []
